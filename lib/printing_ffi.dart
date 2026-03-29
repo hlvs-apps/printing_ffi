@@ -4,7 +4,7 @@ import 'dart:io';
 import 'dart:isolate';
 import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
-import 'package:printing_ffi/printing_ffi_bindings_generated.dart';
+import 'package:printing_ffi/printing_ffi_bindings_generated.dart' hide PrinterAttribute;
 import 'models/models.dart';
 
 export 'models/models.dart';
@@ -651,6 +651,345 @@ class PrintingFfi {
     return completer.future;
   }
 
+  /// Pauses the specified printer (CUPS only - macOS/Linux).
+  ///
+  /// This prevents new jobs from being processed by the printer.
+  /// Jobs already in progress may continue. To pause individual jobs, use [pausePrintJob].
+  ///
+  /// [printerName]: The name of the printer to pause.
+  /// [username]: Optional username for authentication (admin rights may be required).
+  /// [password]: Optional password for authentication.
+  ///
+  /// Returns `true` if the operation succeeded, `false` otherwise.
+  /// Throws [PrintingFfiException] on error.
+  Future<bool> cupsPausePrinter(String printerName, {String? username, String? password}) async {
+    if (!_isCups) {
+      throw PrintingFfiException('cupsPausePrinter is only supported on macOS and Linux');
+    }
+    final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
+    final int requestId = _nextCupsPrinterControlRequestId++;
+    final request = kDebugMode 
+      ? CupsPrinterControlRequest(requestId, printerName, 'pause', null, username, password)
+      : _CupsPrinterControlRequest(requestId, printerName, 'pause', null, username, password);
+    final Completer<bool> completer = Completer<bool>();
+    _cupsPrinterControlRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    return completer.future;
+  }
+
+  /// Resumes the specified printer (CUPS only - macOS/Linux).
+  ///
+  /// This allows the printer to process jobs again after being paused.
+  ///
+  /// [printerName]: The name of the printer to resume.
+  /// [username]: Optional username for authentication (admin rights may be required).
+  /// [password]: Optional password for authentication.
+  ///
+  /// Returns `true` if the operation succeeded, `false` otherwise.
+  /// Throws [PrintingFfiException] on error.
+  Future<bool> cupsResumePrinter(String printerName, {String? username, String? password}) async {
+    if (!_isCups) {
+      throw PrintingFfiException('cupsResumePrinter is only supported on macOS and Linux');
+    }
+    final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
+    final int requestId = _nextCupsPrinterControlRequestId++;
+    final request = kDebugMode 
+      ? CupsPrinterControlRequest(requestId, printerName, 'resume', null, username, password)
+      : _CupsPrinterControlRequest(requestId, printerName, 'resume', null, username, password);
+    final Completer<bool> completer = Completer<bool>();
+    _cupsPrinterControlRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    return completer.future;
+  }
+
+  /// Enables the specified printer (CUPS only - macOS/Linux).
+  ///
+  /// This makes the printer available for accepting jobs.
+  /// This is different from [cupsResumePrinter] - enable/disable controls
+  /// whether the printer can accept jobs, while pause/resume controls job processing.
+  ///
+  /// [printerName]: The name of the printer to enable.
+  /// [username]: Optional username for authentication (admin rights may be required).
+  /// [password]: Optional password for authentication.
+  ///
+  /// Returns `true` if the operation succeeded, `false` otherwise.
+  /// Throws [PrintingFfiException] on error.
+  Future<bool> cupsEnablePrinter(String printerName, {String? username, String? password}) async {
+    if (!_isCups) {
+      throw PrintingFfiException('cupsEnablePrinter is only supported on macOS and Linux');
+    }
+    final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
+    final int requestId = _nextCupsPrinterControlRequestId++;
+    final request = kDebugMode 
+      ? CupsPrinterControlRequest(requestId, printerName, 'enable', null, username, password)
+      : _CupsPrinterControlRequest(requestId, printerName, 'enable', null, username, password);
+    final Completer<bool> completer = Completer<bool>();
+    _cupsPrinterControlRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    return completer.future;
+  }
+
+  /// Disables the specified printer (CUPS only - macOS/Linux).
+  ///
+  /// This prevents the printer from accepting new jobs.
+  /// Jobs already queued will remain in the queue but won't be processed
+  /// until the printer is enabled again.
+  ///
+  /// [printerName]: The name of the printer to disable.
+  /// [reason]: Optional reason for disabling the printer (displayed to users).
+  /// [username]: Optional username for authentication (admin rights may be required).
+  /// [password]: Optional password for authentication.
+  ///
+  /// Returns `true` if the operation succeeded, `false` otherwise.
+  /// Throws [PrintingFfiException] on error.
+  Future<bool> cupsDisablePrinter(String printerName, {String? reason, String? username, String? password}) async {
+    if (!_isCups) {
+      throw PrintingFfiException('cupsDisablePrinter is only supported on macOS and Linux');
+    }
+    final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
+    final int requestId = _nextCupsPrinterControlRequestId++;
+    final request = kDebugMode 
+      ? CupsPrinterControlRequest(requestId, printerName, 'disable', reason, username, password)
+      : _CupsPrinterControlRequest(requestId, printerName, 'disable', reason, username, password);
+    final Completer<bool> completer = Completer<bool>();
+    _cupsPrinterControlRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    return completer.future;
+  }
+
+  /// Configures the printer to accept new jobs (CUPS only - macOS/Linux).
+  ///
+  /// This is the opposite of [cupsRejectJobs]. When a printer is accepting jobs,
+  /// new print jobs can be submitted to its queue.
+  ///
+  /// [printerName]: The name of the printer.
+  /// [username]: Optional username for authentication (admin rights may be required).
+  /// [password]: Optional password for authentication.
+  ///
+  /// Returns `true` if the operation succeeded, `false` otherwise.
+  /// Throws [PrintingFfiException] on error.
+  Future<bool> cupsAcceptJobs(String printerName, {String? username, String? password}) async {
+    if (!_isCups) {
+      throw PrintingFfiException('cupsAcceptJobs is only supported on macOS and Linux');
+    }
+    final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
+    final int requestId = _nextCupsPrinterControlRequestId++;
+    final request = kDebugMode 
+      ? CupsPrinterControlRequest(requestId, printerName, 'accept', null, username, password)
+      : _CupsPrinterControlRequest(requestId, printerName, 'accept', null, username, password);
+    final Completer<bool> completer = Completer<bool>();
+    _cupsPrinterControlRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    return completer.future;
+  }
+
+  /// Configures the printer to reject new jobs (CUPS only - macOS/Linux).
+  ///
+  /// When a printer is rejecting jobs, users cannot submit new print jobs.
+  /// Existing jobs in the queue remain and can still be processed.
+  ///
+  /// [printerName]: The name of the printer.
+  /// [reason]: Optional reason for rejecting jobs (displayed to users).
+  /// [username]: Optional username for authentication (admin rights may be required).
+  /// [password]: Optional password for authentication.
+  ///
+  /// Returns `true` if the operation succeeded, `false` otherwise.
+  /// Throws [PrintingFfiException] on error.
+  Future<bool> cupsRejectJobs(String printerName, {String? reason, String? username, String? password}) async {
+    if (!_isCups) {
+      throw PrintingFfiException('cupsRejectJobs is only supported on macOS and Linux');
+    }
+    final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
+    final int requestId = _nextCupsPrinterControlRequestId++;
+    final request = kDebugMode 
+      ? CupsPrinterControlRequest(requestId, printerName, 'reject', reason, username, password)
+      : _CupsPrinterControlRequest(requestId, printerName, 'reject', reason, username, password);
+    final Completer<bool> completer = Completer<bool>();
+    _cupsPrinterControlRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    return completer.future;
+  }
+
+  /// Holds a specific job in the print queue (CUPS only - macOS/Linux).
+  ///
+  /// A held job will not be printed until it is released with [cupsReleaseJob].
+  /// This is different from [pausePrintJob] which temporarily pauses processing.
+  ///
+  /// [printerName]: The name of the printer.
+  /// [jobId]: The ID of the job to hold.
+  /// [username]: Optional username for authentication.
+  /// [password]: Optional password for authentication.
+  ///
+  /// Returns `true` if the operation succeeded, `false` otherwise.
+  /// Throws [PrintingFfiException] on error.
+  Future<bool> cupsHoldJob(String printerName, int jobId, {String? username, String? password}) async {
+    if (!_isCups) {
+      throw PrintingFfiException('cupsHoldJob is only supported on macOS and Linux');
+    }
+    final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
+    final int requestId = _nextCupsJobControlRequestId++;
+    final request = kDebugMode 
+      ? CupsJobControlRequest(requestId, printerName, jobId, 'hold', null, 0, username, password)
+      : _CupsJobControlRequest(requestId, printerName, jobId, 'hold', null, 0, username, password);
+    final Completer<bool> completer = Completer<bool>();
+    _cupsJobControlRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    return completer.future;
+  }
+
+  /// Releases a held job in the print queue (CUPS only - macOS/Linux).
+  ///
+  /// This allows a previously held job to be processed and printed.
+  ///
+  /// [printerName]: The name of the printer.
+  /// [jobId]: The ID of the job to release.
+  /// [username]: Optional username for authentication.
+  /// [password]: Optional password for authentication.
+  ///
+  /// Returns `true` if the operation succeeded, `false` otherwise.
+  /// Throws [PrintingFfiException] on error.
+  Future<bool> cupsReleaseJob(String printerName, int jobId, {String? username, String? password}) async {
+    if (!_isCups) {
+      throw PrintingFfiException('cupsReleaseJob is only supported on macOS and Linux');
+    }
+    final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
+    final int requestId = _nextCupsJobControlRequestId++;
+    final request = kDebugMode 
+      ? CupsJobControlRequest(requestId, printerName, jobId, 'release', null, 0, username, password)
+      : _CupsJobControlRequest(requestId, printerName, jobId, 'release', null, 0, username, password);
+    final Completer<bool> completer = Completer<bool>();
+    _cupsJobControlRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    return completer.future;
+  }
+
+  /// Moves a job from one printer to another (CUPS only - macOS/Linux).
+  ///
+  /// This transfers a print job from the source printer's queue to the
+  /// destination printer's queue. Useful for load balancing or when a printer
+  /// becomes unavailable.
+  ///
+  /// [sourcePrinter]: The name of the printer where the job currently resides.
+  /// [jobId]: The ID of the job to move.
+  /// [destPrinter]: The name of the destination printer.
+  /// [username]: Optional username for authentication (admin rights may be required).
+  /// [password]: Optional password for authentication.
+  ///
+  /// Returns `true` if the operation succeeded, `false` otherwise.
+  /// Throws [PrintingFfiException] on error.
+  Future<bool> cupsMoveJob(String sourcePrinter, int jobId, String destPrinter, {String? username, String? password}) async {
+    if (!_isCups) {
+      throw PrintingFfiException('cupsMoveJob is only supported on macOS and Linux');
+    }
+    final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
+    final int requestId = _nextCupsJobControlRequestId++;
+    final request = kDebugMode 
+      ? CupsJobControlRequest(requestId, sourcePrinter, jobId, 'move', destPrinter, 0, username, password)
+      : _CupsJobControlRequest(requestId, sourcePrinter, jobId, 'move', destPrinter, 0, username, password);
+    final Completer<bool> completer = Completer<bool>();
+    _cupsJobControlRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    return completer.future;
+  }
+
+  /// Changes the priority of a print job (CUPS only - macOS/Linux).
+  ///
+  /// Priority determines the order in which jobs are printed, with higher
+  /// values indicating higher priority. CUPS priority ranges from 1 (lowest)
+  /// to 100 (highest), with 50 being the default.
+  ///
+  /// [printerName]: The name of the printer.
+  /// [jobId]: The ID of the job to modify.
+  /// [priority]: The new priority (1-100, default is 50).
+  /// [username]: Optional username for authentication.
+  /// [password]: Optional password for authentication.
+  ///
+  /// Returns `true` if the operation succeeded, `false` otherwise.
+  /// Throws [PrintingFfiException] on error.
+  Future<bool> cupsSetJobPriority(String printerName, int jobId, int priority, {String? username, String? password}) async {
+    if (!_isCups) {
+      throw PrintingFfiException('cupsSetJobPriority is only supported on macOS and Linux');
+    }
+    if (priority < 1 || priority > 100) {
+      throw PrintingFfiException('Priority must be between 1 and 100');
+    }
+    final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
+    final int requestId = _nextCupsJobControlRequestId++;
+    final request = kDebugMode 
+      ? CupsJobControlRequest(requestId, printerName, jobId, 'priority', null, priority, username, password)
+      : _CupsJobControlRequest(requestId, printerName, jobId, 'priority', null, priority, username, password);
+    final Completer<bool> completer = Completer<bool>();
+    _cupsJobControlRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    return completer.future;
+  }
+
+  /// Queries a single attribute from a CUPS printer (CUPS only - macOS/Linux).
+  ///
+  /// This allows you to retrieve specific printer attributes like 'printer-state',
+  /// 'printer-make-and-model', 'printer-location', etc. For a list of standard
+  /// IPP attributes, see the IPP specification.
+  ///
+  /// Common attributes include:
+  /// - `printer-state`: Current state (3=idle, 4=processing, 5=stopped)
+  /// - `printer-state-reasons`: Reasons for the current state
+  /// - `printer-make-and-model`: Manufacturer and model
+  /// - `printer-location`: Physical location
+  /// - `printer-info`: Human-readable description
+  /// - `printer-uri-supported`: Supported URIs
+  /// - `device-uri`: Device URI
+  /// - `printer-is-accepting-jobs`: Whether accepting new jobs
+  ///
+  /// [printerName]: The name of the printer.
+  /// [attributeName]: The name of the attribute to query.
+  /// [username]: Optional username for authentication.
+  /// [password]: Optional password for authentication.
+  ///
+  /// Returns a [PrinterAttribute] with the attribute value(s), or `null` if not found.
+  /// Throws [PrintingFfiException] on error.
+  Future<PrinterAttribute?> cupsGetPrinterAttribute(String printerName, String attributeName, {String? username, String? password}) async {
+    if (!_isCups) {
+      throw PrintingFfiException('cupsGetPrinterAttribute is only supported on macOS and Linux');
+    }
+    final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
+    final int requestId = _nextCupsAttributeRequestId++;
+    final request = kDebugMode 
+      ? CupsAttributeRequest(requestId, printerName, [attributeName], username, password)
+      : _CupsAttributeRequest(requestId, printerName, [attributeName], username, password);
+    final Completer<PrinterAttribute?> completer = Completer<PrinterAttribute?>();
+    _cupsAttributeRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    return completer.future;
+  }
+
+  /// Queries multiple attributes from a CUPS printer (CUPS only - macOS/Linux).
+  ///
+  /// This is more efficient than calling [cupsGetPrinterAttribute] multiple times
+  /// as it makes a single IPP request for all attributes.
+  ///
+  /// [printerName]: The name of the printer.
+  /// [attributeNames]: List of attribute names to query.
+  /// [username]: Optional username for authentication.
+  /// [password]: Optional password for authentication.
+  ///
+  /// Returns a list of [PrinterAttribute] objects, one for each requested attribute.
+  /// If an attribute is not found, it will still be included with an empty value.
+  /// Throws [PrintingFfiException] on error.
+  Future<List<PrinterAttribute>> cupsGetPrinterAttributes(String printerName, List<String> attributeNames, {String? username, String? password}) async {
+    if (!_isCups) {
+      throw PrintingFfiException('cupsGetPrinterAttributes is only supported on macOS and Linux');
+    }
+    final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
+    final int requestId = _nextCupsAttributeRequestId++;
+    final request = kDebugMode 
+      ? CupsAttributeRequest(requestId, printerName, attributeNames, username, password)
+      : _CupsAttributeRequest(requestId, printerName, attributeNames, username, password);
+    final Completer<List<PrinterAttribute>> completer = Completer<List<PrinterAttribute>>();
+    _cupsAttributesRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    return completer.future;
+  }
+
   Future<int> _sendRawDataJobRequest(
     String printerName,
     Uint8List data, {
@@ -708,6 +1047,9 @@ class PrintingFfi {
   int _nextSubmitRawDataJobRequestId = 0;
   int _nextSubmitPdfJobRequestId = 0;
   int _nextPrintFileWithDialogRequestId = 0;
+  int _nextCupsPrinterControlRequestId = 0;
+  int _nextCupsJobControlRequestId = 0;
+  int _nextCupsAttributeRequestId = 0;
 
   final Map<int, Completer<bool>> _printRequests = <int, Completer<bool>>{};
   final Map<int, Completer<List<PrintJob>>> _printJobsRequests = <int, Completer<List<PrintJob>>>{};
@@ -719,6 +1061,11 @@ class PrintingFfi {
   final Map<int, Completer<int>> _submitRawDataJobRequests = <int, Completer<int>>{};
   final Map<int, Completer<int>> _submitPdfJobRequests = <int, Completer<int>>{};
   final Map<int, Completer<bool>> _printPdfWithDialogRequests = <int, Completer<bool>>{};
+  final Map<int, Completer<bool>> _cupsPrinterControlRequests = <int, Completer<bool>>{};
+  final Map<int, Completer<bool>> _cupsJobControlRequests = <int, Completer<bool>>{};
+  final Map<int, Completer<PrinterAttribute?>> _cupsAttributeRequests = <int, Completer<PrinterAttribute?>>{};
+  final Map<int, Completer<List<PrinterAttribute>>> _cupsAttributesRequests = <int, Completer<List<PrinterAttribute>>>{};
+
 
   Future<SendPort>? _helperIsolateSendPortFuture;
 
@@ -734,6 +1081,10 @@ class PrintingFfi {
       ..._submitRawDataJobRequests.values,
       ..._submitPdfJobRequests.values,
       ..._printPdfWithDialogRequests.values,
+      ..._cupsPrinterControlRequests.values,
+      ..._cupsJobControlRequests.values,
+      ..._cupsAttributeRequests.values,
+      ..._cupsAttributesRequests.values,
     ];
 
     for (final completer in allCompleters) {
@@ -752,6 +1103,10 @@ class PrintingFfi {
     _submitRawDataJobRequests.clear();
     _submitPdfJobRequests.clear();
     _printPdfWithDialogRequests.clear();
+    _cupsPrinterControlRequests.clear();
+    _cupsJobControlRequests.clear();
+    _cupsAttributeRequests.clear();
+    _cupsAttributesRequests.clear();
   }
 
   Future<SendPort> get _helperIsolateSendPort async {
@@ -870,6 +1225,30 @@ class PrintingFfi {
       completer.complete(data.result);
       return;
     }
+    if (data is _CupsPrinterControlResponse) {
+      final Completer<bool> completer = _cupsPrinterControlRequests[data.id]!;
+      _cupsPrinterControlRequests.remove(data.id);
+      completer.complete(data.result);
+      return;
+    }
+    if (data is _CupsJobControlResponse) {
+      final Completer<bool> completer = _cupsJobControlRequests[data.id]!;
+      _cupsJobControlRequests.remove(data.id);
+      completer.complete(data.result);
+      return;
+    }
+    if (data is _CupsAttributeResponse) {
+      final Completer<PrinterAttribute?> completer = _cupsAttributeRequests[data.id]!;
+      _cupsAttributeRequests.remove(data.id);
+      completer.complete(data.attribute);
+      return;
+    }
+    if (data is _CupsAttributesResponse) {
+      final Completer<List<PrinterAttribute>> completer = _cupsAttributesRequests[data.id]!;
+      _cupsAttributesRequests.remove(data.id);
+      completer.complete(data.attributes);
+      return;
+    }
     if (data is _ErrorResponse) {
       Completer? requestCompleter;
       final allRequestMaps = [
@@ -883,6 +1262,10 @@ class PrintingFfi {
         _submitRawDataJobRequests,
         _submitPdfJobRequests,
         _printPdfWithDialogRequests,
+        _cupsPrinterControlRequests,
+        _cupsJobControlRequests,
+        _cupsAttributeRequests,
+        _cupsAttributesRequests,
       ];
       for (final map in allRequestMaps) {
         if (map.containsKey(data.id)) {
@@ -1066,6 +1449,68 @@ class _ErrorResponse {
 
 class _DisposeRequest {
   const _DisposeRequest();
+}
+
+class _CupsPrinterControlRequest {
+  final int id;
+  final String printerName;
+  final String action; // 'pause', 'resume', 'enable', 'disable', 'accept', 'reject'
+  final String? reason;
+  final String? username;
+  final String? password;
+
+  const _CupsPrinterControlRequest(this.id, this.printerName, this.action, this.reason, this.username, this.password);
+}
+
+class _CupsPrinterControlResponse {
+  final int id;
+  final bool result;
+
+  const _CupsPrinterControlResponse(this.id, this.result);
+}
+
+class _CupsJobControlRequest {
+  final int id;
+  final String printerName;
+  final int jobId;
+  final String action; // 'hold', 'release', 'move', 'priority'
+  final String? destPrinter; // For move operation
+  final int priority; // For priority operation
+  final String? username;
+  final String? password;
+
+  const _CupsJobControlRequest(this.id, this.printerName, this.jobId, this.action, this.destPrinter, this.priority, this.username, this.password);
+}
+
+class _CupsJobControlResponse {
+  final int id;
+  final bool result;
+
+  const _CupsJobControlResponse(this.id, this.result);
+}
+
+class _CupsAttributeRequest {
+  final int id;
+  final String printerName;
+  final List<String> attributeNames;
+  final String? username;
+  final String? password;
+
+  const _CupsAttributeRequest(this.id, this.printerName, this.attributeNames, this.username, this.password);
+}
+
+class _CupsAttributeResponse {
+  final int id;
+  final PrinterAttribute? attribute;
+
+  const _CupsAttributeResponse(this.id, this.attribute);
+}
+
+class _CupsAttributesResponse {
+  final int id;
+  final List<PrinterAttribute> attributes;
+
+  const _CupsAttributesResponse(this.id, this.attributes);
 }
 
 /// The entry point for the helper isolate.
@@ -1567,6 +2012,209 @@ void _helperIsolateEntryPoint(SendPort sendPort) {
           } catch (e, s) {
             sendPort.send(_ErrorResponse(data.id, e, s));
           }
+        } else if (data is _CupsPrinterControlRequest) {
+          try {
+            final namePtr = data.printerName.toNativeUtf8().cast<Char>();
+            final reasonPtr = data.reason?.toNativeUtf8().cast<Char>() ?? nullptr;
+            final usernamePtr = data.username?.toNativeUtf8().cast<Char>() ?? nullptr;
+            final passwordPtr = data.password?.toNativeUtf8().cast<Char>() ?? nullptr;
+            try {
+              bool result = false;
+              switch (data.action) {
+                case 'pause':
+                  result = bindings.cups_pause_printer(namePtr, usernamePtr, passwordPtr);
+                  break;
+                case 'resume':
+                  result = bindings.cups_resume_printer(namePtr, usernamePtr, passwordPtr);
+                  break;
+                case 'enable':
+                  result = bindings.cups_enable_printer(namePtr, usernamePtr, passwordPtr);
+                  break;
+                case 'disable':
+                  result = bindings.cups_disable_printer(namePtr, reasonPtr, usernamePtr, passwordPtr);
+                  break;
+                case 'accept':
+                  result = bindings.cups_accept_jobs(namePtr, usernamePtr, passwordPtr);
+                  break;
+                case 'reject':
+                  result = bindings.cups_reject_jobs(namePtr, reasonPtr, usernamePtr, passwordPtr);
+                  break;
+              }
+              if (result) {
+                sendPort.send(_CupsPrinterControlResponse(data.id, true));
+              } else {
+                final errorMsg = getLastError().toDartString();
+                sendPort.send(_ErrorResponse(data.id, PrintingFfiException(errorMsg), StackTrace.current));
+              }
+            } finally {
+              malloc.free(namePtr);
+              if (reasonPtr != nullptr) malloc.free(reasonPtr);
+              if (usernamePtr != nullptr) malloc.free(usernamePtr);
+              if (passwordPtr != nullptr) malloc.free(passwordPtr);
+            }
+          } catch (e, s) {
+            sendPort.send(_ErrorResponse(data.id, e, s));
+          }
+        } else if (data is _CupsJobControlRequest) {
+          try {
+            final namePtr = data.printerName.toNativeUtf8().cast<Char>();
+            final destPrinterPtr = data.destPrinter?.toNativeUtf8().cast<Char>() ?? nullptr;
+            final usernamePtr = data.username?.toNativeUtf8().cast<Char>() ?? nullptr;
+            final passwordPtr = data.password?.toNativeUtf8().cast<Char>() ?? nullptr;
+            try {
+              bool result = false;
+              switch (data.action) {
+                case 'hold':
+                  result = bindings.cups_hold_job(namePtr, data.jobId, usernamePtr, passwordPtr);
+                  break;
+                case 'release':
+                  result = bindings.cups_release_job(namePtr, data.jobId, usernamePtr, passwordPtr);
+                  break;
+                case 'move':
+                  result = bindings.cups_move_job(namePtr, data.jobId, destPrinterPtr, usernamePtr, passwordPtr);
+                  break;
+                case 'priority':
+                  result = bindings.cups_set_job_priority(namePtr, data.jobId, data.priority, usernamePtr, passwordPtr);
+                  break;
+              }
+              if (result) {
+                sendPort.send(_CupsJobControlResponse(data.id, true));
+              } else {
+                final errorMsg = getLastError().toDartString();
+                sendPort.send(_ErrorResponse(data.id, PrintingFfiException(errorMsg), StackTrace.current));
+              }
+            } finally {
+              malloc.free(namePtr);
+              if (destPrinterPtr != nullptr) malloc.free(destPrinterPtr);
+              if (usernamePtr != nullptr) malloc.free(usernamePtr);
+              if (passwordPtr != nullptr) malloc.free(passwordPtr);
+            }
+          } catch (e, s) {
+            sendPort.send(_ErrorResponse(data.id, e, s));
+          }
+        } else if (data is _CupsAttributeRequest) {
+          try {
+            final namePtr = data.printerName.toNativeUtf8().cast<Char>();
+            final usernamePtr = data.username?.toNativeUtf8().cast<Char>() ?? nullptr;
+            final passwordPtr = data.password?.toNativeUtf8().cast<Char>() ?? nullptr;
+            
+            try {
+              if (data.attributeNames.length == 1) {
+                // Single attribute request
+                final attrNamePtr = data.attributeNames[0].toNativeUtf8().cast<Char>();
+                try {
+                  final attrPtr = bindings.cups_get_printer_attribute(namePtr, attrNamePtr, usernamePtr, passwordPtr);
+                  if (attrPtr == nullptr) {
+                    final errorMsg = getLastError().toDartString();
+                    sendPort.send(_ErrorResponse(data.id, PrintingFfiException(errorMsg), StackTrace.current));
+                  } else {
+                    try {
+                      final attr = attrPtr.ref;
+                      final name = attr.attribute_name.cast<Utf8>().toDartString();
+                      final valueCount = attr.value_count;
+                      
+                      String? singleValue;
+                      List<String>? arrayValues;
+                      
+                      if (valueCount == 1 && attr.attribute_value != nullptr) {
+                        singleValue = attr.attribute_value.cast<Utf8>().toDartString();
+                      } else if (valueCount > 1 && attr.array_values != nullptr) {
+                        arrayValues = [];
+                        for (int i = 0; i < valueCount; i++) {
+                          final valuePtr = attr.array_values[i];
+                          if (valuePtr != nullptr) {
+                            arrayValues.add(valuePtr.cast<Utf8>().toDartString());
+                          }
+                        }
+                      }
+                      
+                      final printerAttr = PrinterAttribute(
+                        name: name,
+                        value: singleValue,
+                        values: arrayValues,
+                        valueCount: valueCount,
+                      );
+                      sendPort.send(_CupsAttributeResponse(data.id, printerAttr));
+                    } finally {
+                      bindings.free_printer_attribute(attrPtr);
+                    }
+                  }
+                } finally {
+                  malloc.free(attrNamePtr);
+                }
+              } else {
+                // Multiple attributes request
+                final int numAttributes = data.attributeNames.length;
+                final attrNamesPtr = malloc<Pointer<Char>>(numAttributes);
+                try {
+                  for (int i = 0; i < numAttributes; i++) {
+                    attrNamesPtr[i] = data.attributeNames[i].toNativeUtf8().cast<Char>();
+                  }
+                  
+                  final attrListPtr = bindings.cups_get_printer_attributes(
+                    namePtr, 
+                    attrNamesPtr.cast(), 
+                    numAttributes, 
+                    usernamePtr, 
+                    passwordPtr
+                  );
+                  
+                  if (attrListPtr == nullptr) {
+                    final errorMsg = getLastError().toDartString();
+                    sendPort.send(_ErrorResponse(data.id, PrintingFfiException(errorMsg), StackTrace.current));
+                  } else {
+                    try {
+                      final attrList = attrListPtr.ref;
+                      final attributes = <PrinterAttribute>[];
+                      
+                      for (int i = 0; i < attrList.count; i++) {
+                        final attr = attrList.attributes[i];
+                        final name = attr.attribute_name.cast<Utf8>().toDartString();
+                        final valueCount = attr.value_count;
+                        
+                        String? singleValue;
+                        List<String>? arrayValues;
+                        
+                        if (valueCount == 1 && attr.attribute_value != nullptr) {
+                          singleValue = attr.attribute_value.cast<Utf8>().toDartString();
+                        } else if (valueCount > 1 && attr.array_values != nullptr) {
+                          arrayValues = [];
+                          for (int j = 0; j < valueCount; j++) {
+                            final valuePtr = attr.array_values[j];
+                            if (valuePtr != nullptr) {
+                              arrayValues.add(valuePtr.cast<Utf8>().toDartString());
+                            }
+                          }
+                        }
+                        
+                        attributes.add(PrinterAttribute(
+                          name: name,
+                          value: singleValue,
+                          values: arrayValues,
+                          valueCount: valueCount,
+                        ));
+                      }
+                      
+                      sendPort.send(_CupsAttributesResponse(data.id, attributes));
+                    } finally {
+                      bindings.free_printer_attribute_list(attrListPtr);
+                    }
+                  }
+                } finally {
+                  for (int i = 0; i < numAttributes; i++) {
+                    malloc.free(attrNamesPtr[i]);
+                  }
+                  malloc.free(attrNamesPtr);
+                }
+              }
+            } finally {
+              malloc.free(namePtr);
+              if (usernamePtr != nullptr) malloc.free(usernamePtr);
+              if (passwordPtr != nullptr) malloc.free(passwordPtr);
+            }
+          } catch (e, s) {
+            sendPort.send(_ErrorResponse(data.id, e, s));
+          }
         }
       });
 
@@ -1693,4 +2341,39 @@ class PrintFileWithDialogRequest extends _PrintFileWithDialogRequest {
 @visibleForTesting
 class PrintFileWithDialogResponse extends _PrintFileWithDialogResponse {
   const PrintFileWithDialogResponse(super.id, super.result);
+}
+
+@visibleForTesting
+class CupsPrinterControlRequest extends _CupsPrinterControlRequest {
+  const CupsPrinterControlRequest(super.id, super.printerName, super.action, super.reason, super.username, super.password);
+}
+
+@visibleForTesting
+class CupsPrinterControlResponse extends _CupsPrinterControlResponse {
+  const CupsPrinterControlResponse(super.id, super.result);
+}
+
+@visibleForTesting
+class CupsJobControlRequest extends _CupsJobControlRequest {
+  const CupsJobControlRequest(super.id, super.printerName, super.jobId, super.action, super.destPrinter, super.priority, super.username, super.password);
+}
+
+@visibleForTesting
+class CupsJobControlResponse extends _CupsJobControlResponse {
+  const CupsJobControlResponse(super.id, super.result);
+}
+
+@visibleForTesting
+class CupsAttributeRequest extends _CupsAttributeRequest {
+  const CupsAttributeRequest(super.id, super.printerName, super.attributeNames, super.username, super.password);
+}
+
+@visibleForTesting
+class CupsAttributeResponse extends _CupsAttributeResponse {
+  const CupsAttributeResponse(super.id, super.attribute);
+}
+
+@visibleForTesting
+class CupsAttributesResponse extends _CupsAttributesResponse {
+  const CupsAttributesResponse(super.id, super.attributes);
 }

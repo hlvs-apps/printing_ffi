@@ -2528,3 +2528,1027 @@ FFI_PLUGIN_EXPORT bool print_file_with_dialog(const char *file_path, const char 
     return cmd_result == 0;
 #endif
 }
+
+// ============================================================================
+// CUPS Printer Control Functions (macOS/Linux only)
+// ============================================================================
+
+#ifndef _WIN32
+// Helper function to create an IPP request with authentication if provided
+static ipp_t *create_ipp_request(ipp_op_t op, const char *printer_name, const char *username, const char *password, http_t **http_out)
+{
+    char uri[HTTP_MAX_URI];
+    
+    // Get printer URI
+    cups_dest_t *dests = NULL;
+    int num_dests = cupsGetDests(&dests);
+    cups_dest_t *dest = NULL;
+    
+    for (int i = 0; i < num_dests; i++)
+    {
+        if (strcmp(dests[i].name, printer_name) == 0)
+        {
+            dest = &dests[i];
+            break;
+        }
+    }
+    
+    if (!dest)
+    {
+        cupsFreeDests(num_dests, dests);
+        set_last_error("Printer '%s' not found", printer_name);
+        return NULL;
+    }
+    
+    // Build printer URI
+    const char *device_uri = cupsGetOption("device-uri", dest->num_options, dest->options);
+    if (device_uri)
+    {
+        snprintf(uri, sizeof(uri), "%s", device_uri);
+    }
+    else
+    {
+        httpAssembleURIf(HTTP_URI_CODING_ALL, uri, sizeof(uri), "ipp", NULL, 
+                         cupsServer(), ippPort(), "/printers/%s", printer_name);
+    }
+    
+    cupsFreeDests(num_dests, dests);
+    
+    // Set authentication if provided
+    if (username && password)
+    {
+        cupsSetUser(username);
+        cupsSetPasswordCB2(NULL, NULL);
+        // Note: CUPS will use the password via callback or environment
+        // For programmatic usage, we'd need a custom password callback
+    }
+    
+    // Create HTTP connection
+    http_t *http = httpConnectEncrypt(cupsServer(), ippPort(), HTTP_ENCRYPT_IF_REQUESTED);
+    if (!http)
+    {
+        set_last_error("Failed to connect to CUPS server");
+        return NULL;
+    }
+    
+    // Create IPP request
+    ipp_t *request = ippNewRequest(op);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", NULL, uri);
+    
+    if (username)
+    {
+        ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, username);
+    }
+    else
+    {
+        ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, cupsUser());
+    }
+    
+    *http_out = http;
+    return request;
+}
+
+// Helper to execute IPP request and check response
+static bool execute_ipp_request(http_t *http, ipp_t *request, const char *operation_name)
+{
+    ipp_t *response = cupsDoRequest(http, request, "/");
+    
+    if (!response)
+    {
+        set_last_error("%s failed: %s", operation_name, cupsLastErrorString());
+        httpClose(http);
+        return false;
+    }
+    
+    ipp_status_t status = ippGetStatusCode(response);
+    bool success = (status <= IPP_OK_CONFLICT);
+    
+    if (!success)
+    {
+        set_last_error("%s failed with status: %s", operation_name, ippErrorString(status));
+    }
+    
+    ippDelete(response);
+    httpClose(http);
+    return success;
+}
+#endif
+
+FFI_PLUGIN_EXPORT bool cups_pause_printer(const char *printer_name, const char *username, const char *password)
+{
+#ifdef _WIN32
+    set_last_error("cups_pause_printer is not supported on Windows");
+    return false;
+#else
+    if (!printer_name)
+    {
+        set_last_error("Printer name is required");
+        return false;
+    }
+    
+    LOG("cups_pause_printer called for printer: '%s'", printer_name);
+    
+    http_t *http = NULL;
+    ipp_t *request = create_ipp_request(IPP_OP_PAUSE_PRINTER, printer_name, username, password, &http);
+    if (!request)
+        return false;
+    
+    return execute_ipp_request(http, request, "Pause printer");
+#endif
+}
+
+FFI_PLUGIN_EXPORT bool cups_resume_printer(const char *printer_name, const char *username, const char *password)
+{
+#ifdef _WIN32
+    set_last_error("cups_resume_printer is not supported on Windows");
+    return false;
+#else
+    if (!printer_name)
+    {
+        set_last_error("Printer name is required");
+        return false;
+    }
+    
+    LOG("cups_resume_printer called for printer: '%s'", printer_name);
+    
+    http_t *http = NULL;
+    ipp_t *request = create_ipp_request(IPP_OP_RESUME_PRINTER, printer_name, username, password, &http);
+    if (!request)
+        return false;
+    
+    return execute_ipp_request(http, request, "Resume printer");
+#endif
+}
+
+FFI_PLUGIN_EXPORT bool cups_enable_printer(const char *printer_name, const char *username, const char *password)
+{
+#ifdef _WIN32
+    set_last_error("cups_enable_printer is not supported on Windows");
+    return false;
+#else
+    if (!printer_name)
+    {
+        set_last_error("Printer name is required");
+        return false;
+    }
+    
+    LOG("cups_enable_printer called for printer: '%s'", printer_name);
+
+    if (username)
+        cupsSetUser(username);
+
+    http_t *http = NULL;
+    ipp_t *request = create_ipp_request(IPP_OP_ENABLE_PRINTER, printer_name, username, password, &http);
+    if (!request)
+        return false;
+
+    return execute_ipp_request(http, request, "Enable printer");
+#endif
+}
+
+FFI_PLUGIN_EXPORT bool cups_disable_printer(const char *printer_name, const char *reason, const char *username, const char *password)
+{
+#ifdef _WIN32
+    set_last_error("cups_disable_printer is not supported on Windows");
+    return false;
+#else
+    if (!printer_name)
+    {
+        set_last_error("Printer name is required");
+        return false;
+    }
+    
+    LOG("cups_disable_printer called for printer: '%s'", printer_name);
+    
+    cups_dest_t *dests = NULL;
+    int num_dests = cupsGetDests(&dests);
+    cups_dest_t *dest = cupsGetDest(printer_name, NULL, num_dests, dests);
+    
+    if (!dest)
+    {
+        cupsFreeDests(num_dests, dests);
+        set_last_error("Printer '%s' not found", printer_name);
+        return false;
+    }
+    
+    if (username)
+        cupsSetUser(username);
+    
+    // For disable, we need to send the reason if provided
+    http_t *http = httpConnectEncrypt(cupsServer(), ippPort(), HTTP_ENCRYPT_IF_REQUESTED);
+    if (!http)
+    {
+        cupsFreeDests(num_dests, dests);
+        set_last_error("Failed to connect to CUPS server");
+        return false;
+    }
+    
+    char uri[HTTP_MAX_URI];
+    httpAssembleURIf(HTTP_URI_CODING_ALL, uri, sizeof(uri), "ipp", NULL, 
+                     cupsServer(), ippPort(), "/printers/%s", printer_name);
+    
+    ipp_t *request = ippNewRequest(IPP_OP_DISABLE_PRINTER);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", NULL, uri);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, username ? username : cupsUser());
+    
+    if (reason && strlen(reason) > 0)
+    {
+        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_TEXT, "printer-state-message", NULL, reason);
+    }
+    
+    ipp_t *response = cupsDoRequest(http, request, "/admin/");
+    cupsFreeDests(num_dests, dests);
+    
+    if (!response)
+    {
+        set_last_error("Disable printer failed: %s", cupsLastErrorString());
+        httpClose(http);
+        return false;
+    }
+    
+    ipp_status_t status = ippGetStatusCode(response);
+    bool success = (status <= IPP_OK_CONFLICT);
+    
+    if (!success)
+    {
+        set_last_error("Disable printer failed with status: %s", ippErrorString(status));
+    }
+    
+    ippDelete(response);
+    httpClose(http);
+    return success;
+#endif
+}
+
+FFI_PLUGIN_EXPORT bool cups_accept_jobs(const char *printer_name, const char *username, const char *password)
+{
+#ifdef _WIN32
+    set_last_error("cups_accept_jobs is not supported on Windows");
+    return false;
+#else
+    if (!printer_name)
+    {
+        set_last_error("Printer name is required");
+        return false;
+    }
+    
+    LOG("cups_accept_jobs called for printer: '%s'", printer_name);
+    
+    if (username)
+        cupsSetUser(username);
+    
+    http_t *http = NULL;
+    ipp_t *request = create_ipp_request(IPP_OP_CUPS_ACCEPT_JOBS, printer_name, username, password, &http);
+    if (!request)
+        return false;
+    
+    return execute_ipp_request(http, request, "Accept jobs");
+#endif
+}
+
+FFI_PLUGIN_EXPORT bool cups_reject_jobs(const char *printer_name, const char *reason, const char *username, const char *password)
+{
+#ifdef _WIN32
+    set_last_error("cups_reject_jobs is not supported on Windows");
+    return false;
+#else
+    if (!printer_name)
+    {
+        set_last_error("Printer name is required");
+        return false;
+    }
+    
+    LOG("cups_reject_jobs called for printer: '%s'", printer_name);
+    
+    if (username)
+        cupsSetUser(username);
+    
+    http_t *http = httpConnectEncrypt(cupsServer(), ippPort(), HTTP_ENCRYPT_IF_REQUESTED);
+    if (!http)
+    {
+        set_last_error("Failed to connect to CUPS server");
+        return false;
+    }
+    
+    char uri[HTTP_MAX_URI];
+    httpAssembleURIf(HTTP_URI_CODING_ALL, uri, sizeof(uri), "ipp", NULL, 
+                     cupsServer(), ippPort(), "/printers/%s", printer_name);
+    
+    ipp_t *request = ippNewRequest(IPP_OP_CUPS_REJECT_JOBS);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", NULL, uri);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, username ? username : cupsUser());
+    
+    if (reason && strlen(reason) > 0)
+    {
+        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_TEXT, "printer-state-message", NULL, reason);
+    }
+    
+    ipp_t *response = cupsDoRequest(http, request, "/admin/");
+    
+    if (!response)
+    {
+        set_last_error("Reject jobs failed: %s", cupsLastErrorString());
+        httpClose(http);
+        return false;
+    }
+    
+    ipp_status_t status = ippGetStatusCode(response);
+    bool success = (status <= IPP_OK_CONFLICT);
+    
+    if (!success)
+    {
+        set_last_error("Reject jobs failed with status: %s", ippErrorString(status));
+    }
+    
+    ippDelete(response);
+    httpClose(http);
+    return success;
+#endif
+}
+
+// ============================================================================
+// CUPS Job Control Functions (macOS/Linux only)
+// ============================================================================
+
+FFI_PLUGIN_EXPORT bool cups_hold_job(const char *printer_name, uint32_t job_id, const char *username, const char *password)
+{
+#ifdef _WIN32
+    set_last_error("cups_hold_job is not supported on Windows");
+    return false;
+#else
+    if (!printer_name)
+    {
+        set_last_error("Printer name is required");
+        return false;
+    }
+    
+    LOG("cups_hold_job called for printer: '%s', job_id: %u", printer_name, job_id);
+    
+    if (username)
+        cupsSetUser(username);
+    
+    http_t *http = httpConnectEncrypt(cupsServer(), ippPort(), HTTP_ENCRYPT_IF_REQUESTED);
+    if (!http)
+    {
+        set_last_error("Failed to connect to CUPS server");
+        return false;
+    }
+    
+    char uri[HTTP_MAX_URI];
+    httpAssembleURIf(HTTP_URI_CODING_ALL, uri, sizeof(uri), "ipp", NULL, 
+                     cupsServer(), ippPort(), "/printers/%s", printer_name);
+    
+    char job_uri[HTTP_MAX_URI];
+    snprintf(job_uri, sizeof(job_uri), "ipp://localhost/jobs/%u", job_id);
+    
+    ipp_t *request = ippNewRequest(IPP_OP_HOLD_JOB);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", NULL, uri);
+    ippAddInteger(request, IPP_TAG_OPERATION, IPP_TAG_INTEGER, "job-id", job_id);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, username ? username : cupsUser());
+    
+    ipp_t *response = cupsDoRequest(http, request, "/jobs/");
+    
+    if (!response)
+    {
+        set_last_error("Hold job failed: %s", cupsLastErrorString());
+        httpClose(http);
+        return false;
+    }
+    
+    ipp_status_t status = ippGetStatusCode(response);
+    bool success = (status <= IPP_OK_CONFLICT);
+    
+    if (!success)
+    {
+        set_last_error("Hold job failed with status: %s", ippErrorString(status));
+    }
+    
+    ippDelete(response);
+    httpClose(http);
+    return success;
+#endif
+}
+
+FFI_PLUGIN_EXPORT bool cups_release_job(const char *printer_name, uint32_t job_id, const char *username, const char *password)
+{
+#ifdef _WIN32
+    set_last_error("cups_release_job is not supported on Windows");
+    return false;
+#else
+    if (!printer_name)
+    {
+        set_last_error("Printer name is required");
+        return false;
+    }
+    
+    LOG("cups_release_job called for printer: '%s', job_id: %u", printer_name, job_id);
+    
+    if (username)
+        cupsSetUser(username);
+    
+    http_t *http = httpConnectEncrypt(cupsServer(), ippPort(), HTTP_ENCRYPT_IF_REQUESTED);
+    if (!http)
+    {
+        set_last_error("Failed to connect to CUPS server");
+        return false;
+    }
+    
+    char uri[HTTP_MAX_URI];
+    httpAssembleURIf(HTTP_URI_CODING_ALL, uri, sizeof(uri), "ipp", NULL, 
+                     cupsServer(), ippPort(), "/printers/%s", printer_name);
+    
+    ipp_t *request = ippNewRequest(IPP_OP_RELEASE_JOB);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", NULL, uri);
+    ippAddInteger(request, IPP_TAG_OPERATION, IPP_TAG_INTEGER, "job-id", job_id);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, username ? username : cupsUser());
+    
+    ipp_t *response = cupsDoRequest(http, request, "/jobs/");
+    
+    if (!response)
+    {
+        set_last_error("Release job failed: %s", cupsLastErrorString());
+        httpClose(http);
+        return false;
+    }
+    
+    ipp_status_t status = ippGetStatusCode(response);
+    bool success = (status <= IPP_OK_CONFLICT);
+    
+    if (!success)
+    {
+        set_last_error("Release job failed with status: %s", ippErrorString(status));
+    }
+    
+    ippDelete(response);
+    httpClose(http);
+    return success;
+#endif
+}
+
+FFI_PLUGIN_EXPORT bool cups_move_job(const char *source_printer, uint32_t job_id, const char *dest_printer, const char *username, const char *password)
+{
+#ifdef _WIN32
+    set_last_error("cups_move_job is not supported on Windows");
+    return false;
+#else
+    if (!source_printer || !dest_printer)
+    {
+        set_last_error("Source and destination printer names are required");
+        return false;
+    }
+    
+    LOG("cups_move_job called: job_id=%u from '%s' to '%s'", job_id, source_printer, dest_printer);
+    
+    if (username)
+        cupsSetUser(username);
+    
+    http_t *http = httpConnectEncrypt(cupsServer(), ippPort(), HTTP_ENCRYPT_IF_REQUESTED);
+    if (!http)
+    {
+        set_last_error("Failed to connect to CUPS server");
+        return false;
+    }
+    
+    char job_uri[HTTP_MAX_URI];
+    httpAssembleURIf(HTTP_URI_CODING_ALL, job_uri, sizeof(job_uri), "ipp", NULL, 
+                     cupsServer(), ippPort(), "/jobs/%u", job_id);
+    
+    char dest_uri[HTTP_MAX_URI];
+    httpAssembleURIf(HTTP_URI_CODING_ALL, dest_uri, sizeof(dest_uri), "ipp", NULL, 
+                     cupsServer(), ippPort(), "/printers/%s", dest_printer);
+    
+    ipp_t *request = ippNewRequest(IPP_OP_CUPS_MOVE_JOB);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "job-uri", NULL, job_uri);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, username ? username : cupsUser());
+    ippAddString(request, IPP_TAG_JOB, IPP_TAG_URI, "job-printer-uri", NULL, dest_uri);
+    
+    ipp_t *response = cupsDoRequest(http, request, "/jobs/");
+    
+    if (!response)
+    {
+        set_last_error("Move job failed: %s", cupsLastErrorString());
+        httpClose(http);
+        return false;
+    }
+    
+    ipp_status_t status = ippGetStatusCode(response);
+    bool success = (status <= IPP_OK_CONFLICT);
+    
+    if (!success)
+    {
+        set_last_error("Move job failed with status: %s", ippErrorString(status));
+    }
+    
+    ippDelete(response);
+    httpClose(http);
+    return success;
+#endif
+}
+
+FFI_PLUGIN_EXPORT bool cups_set_job_priority(const char *printer_name, uint32_t job_id, int priority, const char *username, const char *password)
+{
+#ifdef _WIN32
+    set_last_error("cups_set_job_priority is not supported on Windows");
+    return false;
+#else
+    if (!printer_name)
+    {
+        set_last_error("Printer name is required");
+        return false;
+    }
+    
+    // CUPS priority ranges from 1 (lowest) to 100 (highest)
+    if (priority < 1 || priority > 100)
+    {
+        set_last_error("Priority must be between 1 and 100");
+        return false;
+    }
+    
+    LOG("cups_set_job_priority called: job_id=%u, priority=%d", job_id, priority);
+    
+    if (username)
+        cupsSetUser(username);
+    
+    http_t *http = httpConnectEncrypt(cupsServer(), ippPort(), HTTP_ENCRYPT_IF_REQUESTED);
+    if (!http)
+    {
+        set_last_error("Failed to connect to CUPS server");
+        return false;
+    }
+    
+    char job_uri[HTTP_MAX_URI];
+    httpAssembleURIf(HTTP_URI_CODING_ALL, job_uri, sizeof(job_uri), "ipp", NULL, 
+                     cupsServer(), ippPort(), "/jobs/%u", job_id);
+    
+    ipp_t *request = ippNewRequest(IPP_OP_SET_JOB_ATTRIBUTES);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "job-uri", NULL, job_uri);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, username ? username : cupsUser());
+    ippAddInteger(request, IPP_TAG_JOB, IPP_TAG_INTEGER, "job-priority", priority);
+    
+    ipp_t *response = cupsDoRequest(http, request, "/jobs/");
+    
+    if (!response)
+    {
+        set_last_error("Set job priority failed: %s", cupsLastErrorString());
+        httpClose(http);
+        return false;
+    }
+    
+    ipp_status_t status = ippGetStatusCode(response);
+    bool success = (status <= IPP_OK_CONFLICT);
+    
+    if (!success)
+    {
+        set_last_error("Set job priority failed with status: %s", ippErrorString(status));
+    }
+    
+    ippDelete(response);
+    httpClose(http);
+    return success;
+#endif
+}
+
+// ============================================================================
+// CUPS Printer Attribute Query Functions (macOS/Linux only)
+// ============================================================================
+
+FFI_PLUGIN_EXPORT PrinterAttribute *cups_get_printer_attribute(const char *printer_name, const char *attribute_name, const char *username, const char *password)
+{
+#ifdef _WIN32
+    set_last_error("cups_get_printer_attribute is not supported on Windows");
+    return NULL;
+#else
+    if (!printer_name || !attribute_name)
+    {
+        set_last_error("Printer name and attribute name are required");
+        return NULL;
+    }
+    
+    LOG("cups_get_printer_attribute called: printer='%s', attribute='%s'", printer_name, attribute_name);
+    
+    if (username)
+        cupsSetUser(username);
+    
+    http_t *http = httpConnectEncrypt(cupsServer(), ippPort(), HTTP_ENCRYPT_IF_REQUESTED);
+    if (!http)
+    {
+        set_last_error("Failed to connect to CUPS server");
+        return NULL;
+    }
+    
+    char uri[HTTP_MAX_URI];
+    httpAssembleURIf(HTTP_URI_CODING_ALL, uri, sizeof(uri), "ipp", NULL, 
+                     cupsServer(), ippPort(), "/printers/%s", printer_name);
+    
+    ipp_t *request = ippNewRequest(IPP_OP_GET_PRINTER_ATTRIBUTES);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", NULL, uri);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, username ? username : cupsUser());
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_KEYWORD, "requested-attributes", NULL, attribute_name);
+    
+    ipp_t *response = cupsDoRequest(http, request, "/");
+    
+    if (!response)
+    {
+        set_last_error("Get printer attribute failed: %s", cupsLastErrorString());
+        httpClose(http);
+        return NULL;
+    }
+    
+    ipp_status_t status = ippGetStatusCode(response);
+    if (status > IPP_OK_CONFLICT)
+    {
+        set_last_error("Get printer attribute failed with status: %s", ippErrorString(status));
+        ippDelete(response);
+        httpClose(http);
+        return NULL;
+    }
+    
+    // Find the requested attribute
+    ipp_attribute_t *attr = ippFindAttribute(response, attribute_name, IPP_TAG_ZERO);
+    if (!attr)
+    {
+        set_last_error("Attribute '%s' not found", attribute_name);
+        ippDelete(response);
+        httpClose(http);
+        return NULL;
+    }
+    
+    // Allocate result structure
+    PrinterAttribute *result = (PrinterAttribute *)calloc(1, sizeof(PrinterAttribute));
+    if (!result)
+    {
+        ippDelete(response);
+        httpClose(http);
+        return NULL;
+    }
+    
+    result->attribute_name = strdup(attribute_name);
+    
+    // Get the attribute value(s)
+    int value_count = ippGetCount(attr);
+    result->value_count = value_count;
+    
+    if (value_count == 1)
+    {
+        // Single value - store in attribute_value
+        const char *value = NULL;
+        ipp_tag_t value_tag = ippGetValueTag(attr);
+        
+        switch (value_tag)
+        {
+            case IPP_TAG_INTEGER:
+            case IPP_TAG_ENUM:
+            {
+                int int_val = ippGetInteger(attr, 0);
+                char buffer[32];
+                snprintf(buffer, sizeof(buffer), "%d", int_val);
+                value = buffer;
+                break;
+            }
+            case IPP_TAG_BOOLEAN:
+            {
+                int bool_val = ippGetBoolean(attr, 0);
+                value = bool_val ? "true" : "false";
+                break;
+            }
+            case IPP_TAG_STRING:
+            case IPP_TAG_TEXT:
+            case IPP_TAG_NAME:
+            case IPP_TAG_KEYWORD:
+            case IPP_TAG_URI:
+            case IPP_TAG_URISCHEME:
+            case IPP_TAG_CHARSET:
+            case IPP_TAG_LANGUAGE:
+            case IPP_TAG_MIMETYPE:
+                value = ippGetString(attr, 0, NULL);
+                break;
+            default:
+                value = "unsupported-type";
+                break;
+        }
+        
+        result->attribute_value = value ? strdup(value) : strdup("");
+        result->array_values = NULL;
+    }
+    else if (value_count > 1)
+    {
+        // Multiple values - store in array_values
+        result->attribute_value = NULL;
+        result->array_values = (char **)calloc(value_count, sizeof(char *));
+        
+        if (result->array_values)
+        {
+            ipp_tag_t value_tag = ippGetValueTag(attr);
+            
+            for (int i = 0; i < value_count; i++)
+            {
+                const char *value = NULL;
+                char buffer[32];
+                
+                switch (value_tag)
+                {
+                    case IPP_TAG_INTEGER:
+                    case IPP_TAG_ENUM:
+                    {
+                        int int_val = ippGetInteger(attr, i);
+                        snprintf(buffer, sizeof(buffer), "%d", int_val);
+                        value = buffer;
+                        break;
+                    }
+                    case IPP_TAG_BOOLEAN:
+                    {
+                        int bool_val = ippGetBoolean(attr, i);
+                        value = bool_val ? "true" : "false";
+                        break;
+                    }
+                    case IPP_TAG_STRING:
+                    case IPP_TAG_TEXT:
+                    case IPP_TAG_NAME:
+                    case IPP_TAG_KEYWORD:
+                    case IPP_TAG_URI:
+                    case IPP_TAG_URISCHEME:
+                    case IPP_TAG_CHARSET:
+                    case IPP_TAG_LANGUAGE:
+                    case IPP_TAG_MIMETYPE:
+                        value = ippGetString(attr, i, NULL);
+                        break;
+                    default:
+                        value = "unsupported-type";
+                        break;
+                }
+                
+                result->array_values[i] = value ? strdup(value) : strdup("");
+            }
+        }
+    }
+    else
+    {
+        // No values
+        result->attribute_value = strdup("");
+        result->array_values = NULL;
+    }
+    
+    ippDelete(response);
+    httpClose(http);
+    return result;
+#endif
+}
+
+FFI_PLUGIN_EXPORT PrinterAttributeList *cups_get_printer_attributes(const char *printer_name, const char **attribute_names, int num_attributes, const char *username, const char *password)
+{
+#ifdef _WIN32
+    set_last_error("cups_get_printer_attributes is not supported on Windows");
+    return NULL;
+#else
+    if (!printer_name || !attribute_names || num_attributes <= 0)
+    {
+        set_last_error("Printer name and attribute names are required");
+        return NULL;
+    }
+    
+    LOG("cups_get_printer_attributes called for printer: '%s', %d attributes", printer_name, num_attributes);
+    
+    if (username)
+        cupsSetUser(username);
+    
+    http_t *http = httpConnectEncrypt(cupsServer(), ippPort(), HTTP_ENCRYPT_IF_REQUESTED);
+    if (!http)
+    {
+        set_last_error("Failed to connect to CUPS server");
+        return NULL;
+    }
+    
+    char uri[HTTP_MAX_URI];
+    httpAssembleURIf(HTTP_URI_CODING_ALL, uri, sizeof(uri), "ipp", NULL, 
+                     cupsServer(), ippPort(), "/printers/%s", printer_name);
+    
+    ipp_t *request = ippNewRequest(IPP_OP_GET_PRINTER_ATTRIBUTES);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", NULL, uri);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, username ? username : cupsUser());
+    
+    // Add all requested attributes
+    for (int i = 0; i < num_attributes; i++)
+    {
+        ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_KEYWORD, "requested-attributes", NULL, attribute_names[i]);
+    }
+    
+    ipp_t *response = cupsDoRequest(http, request, "/");
+    
+    if (!response)
+    {
+        set_last_error("Get printer attributes failed: %s", cupsLastErrorString());
+        httpClose(http);
+        return NULL;
+    }
+    
+    ipp_status_t status = ippGetStatusCode(response);
+    if (status > IPP_OK_CONFLICT)
+    {
+        set_last_error("Get printer attributes failed with status: %s", ippErrorString(status));
+        ippDelete(response);
+        httpClose(http);
+        return NULL;
+    }
+    
+    // Allocate result list
+    PrinterAttributeList *result = (PrinterAttributeList *)calloc(1, sizeof(PrinterAttributeList));
+    if (!result)
+    {
+        ippDelete(response);
+        httpClose(http);
+        return NULL;
+    }
+    
+    result->count = num_attributes;
+    result->attributes = (PrinterAttribute *)calloc(num_attributes, sizeof(PrinterAttribute));
+    
+    if (!result->attributes)
+    {
+        free(result);
+        ippDelete(response);
+        httpClose(http);
+        return NULL;
+    }
+    
+    // Extract each requested attribute
+    for (int i = 0; i < num_attributes; i++)
+    {
+        const char *attr_name = attribute_names[i];
+        result->attributes[i].attribute_name = strdup(attr_name);
+        
+        ipp_attribute_t *attr = ippFindAttribute(response, attr_name, IPP_TAG_ZERO);
+        if (!attr)
+        {
+            // Attribute not found
+            result->attributes[i].attribute_value = strdup("not-found");
+            result->attributes[i].value_count = 0;
+            result->attributes[i].array_values = NULL;
+            continue;
+        }
+        
+        int value_count = ippGetCount(attr);
+        result->attributes[i].value_count = value_count;
+        
+        if (value_count == 1)
+        {
+            // Single value
+            const char *value = NULL;
+            ipp_tag_t value_tag = ippGetValueTag(attr);
+            char buffer[256];
+            
+            switch (value_tag)
+            {
+                case IPP_TAG_INTEGER:
+                case IPP_TAG_ENUM:
+                {
+                    int int_val = ippGetInteger(attr, 0);
+                    snprintf(buffer, sizeof(buffer), "%d", int_val);
+                    value = buffer;
+                    break;
+                }
+                case IPP_TAG_BOOLEAN:
+                {
+                    int bool_val = ippGetBoolean(attr, 0);
+                    value = bool_val ? "true" : "false";
+                    break;
+                }
+                case IPP_TAG_STRING:
+                case IPP_TAG_TEXT:
+                case IPP_TAG_NAME:
+                case IPP_TAG_KEYWORD:
+                case IPP_TAG_URI:
+                case IPP_TAG_URISCHEME:
+                case IPP_TAG_CHARSET:
+                case IPP_TAG_LANGUAGE:
+                case IPP_TAG_MIMETYPE:
+                    value = ippGetString(attr, 0, NULL);
+                    break;
+                default:
+                    snprintf(buffer, sizeof(buffer), "unsupported-type-%d", value_tag);
+                    value = buffer;
+                    break;
+            }
+            
+            result->attributes[i].attribute_value = value ? strdup(value) : strdup("");
+            result->attributes[i].array_values = NULL;
+        }
+        else if (value_count > 1)
+        {
+            // Multiple values
+            result->attributes[i].attribute_value = NULL;
+            result->attributes[i].array_values = (char **)calloc(value_count, sizeof(char *));
+            
+            if (result->attributes[i].array_values)
+            {
+                ipp_tag_t value_tag = ippGetValueTag(attr);
+                
+                for (int j = 0; j < value_count; j++)
+                {
+                    const char *value = NULL;
+                    char buffer[256];
+                    
+                    switch (value_tag)
+                    {
+                        case IPP_TAG_INTEGER:
+                        case IPP_TAG_ENUM:
+                        {
+                            int int_val = ippGetInteger(attr, j);
+                            snprintf(buffer, sizeof(buffer), "%d", int_val);
+                            value = buffer;
+                            break;
+                        }
+                        case IPP_TAG_BOOLEAN:
+                        {
+                            int bool_val = ippGetBoolean(attr, j);
+                            value = bool_val ? "true" : "false";
+                            break;
+                        }
+                        case IPP_TAG_STRING:
+                        case IPP_TAG_TEXT:
+                        case IPP_TAG_NAME:
+                        case IPP_TAG_KEYWORD:
+                        case IPP_TAG_URI:
+                        case IPP_TAG_URISCHEME:
+                        case IPP_TAG_CHARSET:
+                        case IPP_TAG_LANGUAGE:
+                        case IPP_TAG_MIMETYPE:
+                            value = ippGetString(attr, j, NULL);
+                            break;
+                        default:
+                            snprintf(buffer, sizeof(buffer), "unsupported-type-%d", value_tag);
+                            value = buffer;
+                            break;
+                    }
+                    
+                    result->attributes[i].array_values[j] = value ? strdup(value) : strdup("");
+                }
+            }
+        }
+        else
+        {
+            // No values
+            result->attributes[i].attribute_value = strdup("");
+            result->attributes[i].array_values = NULL;
+        }
+    }
+    
+    ippDelete(response);
+    httpClose(http);
+    return result;
+#endif
+}
+
+FFI_PLUGIN_EXPORT void free_printer_attribute(PrinterAttribute *attribute)
+{
+    if (!attribute)
+        return;
+    
+    if (attribute->attribute_name)
+        free(attribute->attribute_name);
+    
+    if (attribute->attribute_value)
+        free(attribute->attribute_value);
+    
+    if (attribute->array_values)
+    {
+        for (int i = 0; i < attribute->value_count; i++)
+        {
+            if (attribute->array_values[i])
+                free(attribute->array_values[i]);
+        }
+        free(attribute->array_values);
+    }
+    
+    free(attribute);
+}
+
+FFI_PLUGIN_EXPORT void free_printer_attribute_list(PrinterAttributeList *attribute_list)
+{
+    if (!attribute_list)
+        return;
+    
+    if (attribute_list->attributes)
+    {
+        for (int i = 0; i < attribute_list->count; i++)
+        {
+            if (attribute_list->attributes[i].attribute_name)
+                free(attribute_list->attributes[i].attribute_name);
+            
+            if (attribute_list->attributes[i].attribute_value)
+                free(attribute_list->attributes[i].attribute_value);
+            
+            if (attribute_list->attributes[i].array_values)
+            {
+                for (int j = 0; j < attribute_list->attributes[i].value_count; j++)
+                {
+                    if (attribute_list->attributes[i].array_values[j])
+                        free(attribute_list->attributes[i].array_values[j]);
+                }
+                free(attribute_list->attributes[i].array_values);
+            }
+        }
+        free(attribute_list->attributes);
+    }
+    
+    free(attribute_list);
+}

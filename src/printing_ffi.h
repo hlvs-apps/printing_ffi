@@ -175,6 +175,41 @@ extern "C"
     FFI_PLUGIN_EXPORT void shutdown_pdfium_library(void);
     FFI_PLUGIN_EXPORT bool print_file_with_dialog(const char *file_path, const char *doc_name);
 
+    // CUPS printer control functions (macOS/Linux only)
+    FFI_PLUGIN_EXPORT bool cups_pause_printer(const char *printer_name, const char *username, const char *password);
+    FFI_PLUGIN_EXPORT bool cups_resume_printer(const char *printer_name, const char *username, const char *password);
+    FFI_PLUGIN_EXPORT bool cups_enable_printer(const char *printer_name, const char *username, const char *password);
+    FFI_PLUGIN_EXPORT bool cups_disable_printer(const char *printer_name, const char *reason, const char *username, const char *password);
+    FFI_PLUGIN_EXPORT bool cups_accept_jobs(const char *printer_name, const char *username, const char *password);
+    FFI_PLUGIN_EXPORT bool cups_reject_jobs(const char *printer_name, const char *reason, const char *username, const char *password);
+
+    // CUPS job control functions (macOS/Linux only)
+    FFI_PLUGIN_EXPORT bool cups_hold_job(const char *printer_name, uint32_t job_id, const char *username, const char *password);
+    FFI_PLUGIN_EXPORT bool cups_release_job(const char *printer_name, uint32_t job_id, const char *username, const char *password);
+    FFI_PLUGIN_EXPORT bool cups_move_job(const char *source_printer, uint32_t job_id, const char *dest_printer, const char *username, const char *password);
+    FFI_PLUGIN_EXPORT bool cups_set_job_priority(const char *printer_name, uint32_t job_id, int priority, const char *username, const char *password);
+
+    // Struct for printer attribute query result
+    typedef struct
+    {
+        char *attribute_name;
+        char *attribute_value;
+        int value_count;       // For array attributes
+        char **array_values;   // For array attributes (NULL if value_count <= 1)
+    } PrinterAttribute;
+
+    typedef struct
+    {
+        int count;
+        PrinterAttribute *attributes;
+    } PrinterAttributeList;
+
+    // CUPS printer attribute query functions (macOS/Linux only)
+    FFI_PLUGIN_EXPORT PrinterAttribute *cups_get_printer_attribute(const char *printer_name, const char *attribute_name, const char *username, const char *password);
+    FFI_PLUGIN_EXPORT PrinterAttributeList *cups_get_printer_attributes(const char *printer_name, const char **attribute_names, int num_attributes, const char *username, const char *password);
+    FFI_PLUGIN_EXPORT void free_printer_attribute(PrinterAttribute *attribute);
+    FFI_PLUGIN_EXPORT void free_printer_attribute_list(PrinterAttributeList *attribute_list);
+
 #ifdef __cplusplus
 }
 #endif

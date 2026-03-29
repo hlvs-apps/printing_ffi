@@ -569,7 +569,270 @@ Future<void> printWithCupsOptions() async {
 }
 ```
 
-### 8. Printer Properties Dialog (Windows)
+### 8. CUPS Printer Control (macOS/Linux)
+
+```dart
+// Pause a printer - stops processing jobs
+Future<void> pausePrinter() async {
+  if (Platform.isWindows) {
+    print('CUPS features are not available on Windows');
+    return;
+  }
+
+  try {
+    bool success = await printingFfi.cupsPausePrinter(
+      'Office_Printer',
+      username: 'admin', // Optional, may be required for admin operations
+      password: 'password', // Optional
+    );
+    
+    if (success) {
+      print('Printer paused successfully');
+    } else {
+      print('Failed to pause printer');
+    }
+  } catch (e) {
+    print('Error pausing printer: $e');
+  }
+}
+
+// Resume a paused printer
+Future<void> resumePrinter() async {
+  bool success = await printingFfi.cupsResumePrinter('Office_Printer');
+  print('Printer resumed: $success');
+}
+
+// Enable a printer - allows it to accept jobs
+Future<void> enablePrinter() async {
+  bool success = await printingFfi.cupsEnablePrinter(
+    'Office_Printer',
+    username: 'admin',
+  );
+  print('Printer enabled: $success');
+}
+
+// Disable a printer with a reason
+Future<void> disablePrinter() async {
+  bool success = await printingFfi.cupsDisablePrinter(
+    'Office_Printer',
+    reason: 'Maintenance in progress',
+    username: 'admin',
+  );
+  print('Printer disabled: $success');
+}
+
+// Configure printer to accept new jobs
+Future<void> acceptJobs() async {
+  bool success = await printingFfi.cupsAcceptJobs(
+    'Office_Printer',
+    username: 'admin',
+  );
+  print('Printer accepting jobs: $success');
+}
+
+// Configure printer to reject new jobs
+Future<void> rejectJobs() async {
+  bool success = await printingFfi.cupsRejectJobs(
+    'Office_Printer',
+    reason: 'Printer undergoing repairs',
+    username: 'admin',
+  );
+  print('Printer rejecting jobs: $success');
+}
+```
+
+### 9. CUPS Job Control (macOS/Linux)
+
+```dart
+// Hold a job (prevent it from printing)
+Future<void> holdJob() async {
+  if (Platform.isWindows) {
+    print('CUPS features are not available on Windows');
+    return;
+  }
+
+  try {
+    // First get the jobs
+    List<PrintJob> jobs = await printingFfi.listPrintJobs('Office_Printer');
+    
+    if (jobs.isEmpty) {
+      print('No jobs to hold');
+      return;
+    }
+
+    // Hold the first job
+    bool success = await printingFfi.cupsHoldJob(
+      'Office_Printer',
+      jobs.first.id,
+      username: 'admin',
+    );
+    
+    print('Job held: $success');
+  } catch (e) {
+    print('Error holding job: $e');
+  }
+}
+
+// Release a held job
+Future<void> releaseJob() async {
+  List<PrintJob> jobs = await printingFfi.listPrintJobs('Office_Printer');
+  
+  if (jobs.isNotEmpty) {
+    bool success = await printingFfi.cupsReleaseJob(
+      'Office_Printer',
+      jobs.first.id,
+    );
+    print('Job released: $success');
+  }
+}
+
+// Move a job to a different printer
+Future<void> moveJob() async {
+  try {
+    List<PrintJob> jobs = await printingFfi.listPrintJobs('Printer1');
+    
+    if (jobs.isEmpty) {
+      print('No jobs to move');
+      return;
+    }
+
+    bool success = await printingFfi.cupsMoveJob(
+      'Printer1',
+      jobs.first.id,
+      'Printer2',
+      username: 'admin',
+    );
+    
+    if (success) {
+      print('Job moved from Printer1 to Printer2');
+    }
+  } catch (e) {
+    print('Error moving job: $e');
+  }
+}
+
+// Change job priority (1-100, with 50 being default)
+Future<void> changeJobPriority() async {
+  List<PrintJob> jobs = await printingFfi.listPrintJobs('Office_Printer');
+  
+  if (jobs.isNotEmpty) {
+    bool success = await printingFfi.cupsSetJobPriority(
+      'Office_Printer',
+      jobs.first.id,
+      80, // High priority
+      username: 'admin',
+    );
+    print('Job priority changed: $success');
+  }
+}
+```
+
+### 10. CUPS Printer Attributes (macOS/Linux)
+
+```dart
+// Query a single printer attribute
+Future<void> querySingleAttribute() async {
+  if (Platform.isWindows) {
+    print('CUPS features are not available on Windows');
+    return;
+  }
+
+  try {
+    PrinterAttribute? attribute = await printingFfi.cupsGetPrinterAttribute(
+      'Office_Printer',
+      'printer-state',
+    );
+    
+    if (attribute != null) {
+      print('Attribute: ${attribute.name}');
+      if (attribute.isSingleValue) {
+        print('Value: ${attribute.value}');
+      } else if (attribute.isMultiValue) {
+        print('Values: ${attribute.values}');
+      }
+    }
+  } catch (e) {
+    print('Error querying attribute: $e');
+  }
+}
+
+// Query multiple printer attributes at once
+Future<void> queryMultipleAttributes() async {
+  try {
+    List<PrinterAttribute> attributes = await printingFfi.cupsGetPrinterAttributes(
+      'Office_Printer',
+      [
+        'printer-state',
+        'printer-state-reasons',
+        'printer-make-and-model',
+        'printer-location',
+        'printer-info',
+        'printer-is-accepting-jobs',
+        'printer-uri-supported',
+        'device-uri',
+      ],
+    );
+    
+    print('Printer Attributes:');
+    for (var attr in attributes) {
+      if (attr.isSingleValue) {
+        print('  ${attr.name}: ${attr.value}');
+      } else if (attr.isMultiValue) {
+        print('  ${attr.name}: [${attr.values!.join(', ')}]');
+      }
+    }
+  } catch (e) {
+    print('Error querying attributes: $e');
+  }
+}
+
+// Comprehensive printer status check
+Future<void> comprehensivePrinterStatus() async {
+  try {
+    List<PrinterAttribute> attributes = await printingFfi.cupsGetPrinterAttributes(
+      'Office_Printer',
+      [
+        'printer-state',
+        'printer-state-reasons',
+        'printer-is-accepting-jobs',
+        'queued-job-count',
+      ],
+    );
+    
+    for (var attr in attributes) {
+      switch (attr.name) {
+        case 'printer-state':
+          int state = int.tryParse(attr.value ?? '0') ?? 0;
+          String stateStr = switch (state) {
+            3 => 'Idle',
+            4 => 'Processing',
+            5 => 'Stopped',
+            _ => 'Unknown ($state)',
+          };
+          print('State: $stateStr');
+          break;
+        case 'printer-state-reasons':
+          if (attr.isMultiValue) {
+            print('State reasons: ${attr.values!.join(', ')}');
+          } else {
+            print('State reason: ${attr.value}');
+          }
+          break;
+        case 'printer-is-accepting-jobs':
+          print('Accepting jobs: ${attr.value}');
+          break;
+        case 'queued-job-count':
+          print('Jobs in queue: ${attr.value}');
+          break;
+      }
+    }
+  } catch (e) {
+    print('Error checking printer status: $e');
+  }
+}
+```
+
+### 11. Printer Properties Dialog (Windows)
 
 ```dart
 // Open Windows printer properties dialog
@@ -600,7 +863,7 @@ Future<void> openPrinterProperties() async {
 }
 ```
 
-### 9. Error Handling and Best Practices
+### 12. Error Handling and Best Practices
 
 ```dart
 class PrintingService {
@@ -654,7 +917,7 @@ class PrintingService {
 }
 ```
 
-### 10. Complete Example Widget
+### 13. Complete Example Widget
 
 ```dart
 class PrintingWidget extends StatefulWidget {
