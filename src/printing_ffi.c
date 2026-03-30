@@ -3360,12 +3360,9 @@ FFI_PLUGIN_EXPORT PrinterAttributeList *cups_get_printer_attributes(const char *
     ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", NULL, uri);
     ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, username ? username : cupsUser());
     
-    // Add all requested attributes
-    for (int i = 0; i < num_attributes; i++)
-    {
-        ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_KEYWORD, "requested-attributes", NULL, attribute_names[i]);
-    }
-    
+    // requested-attributes is a 1setOf keyword; send all names in one attribute.
+    ippAddStrings(request, IPP_TAG_OPERATION, IPP_TAG_KEYWORD, "requested-attributes", num_attributes, NULL, attribute_names);
+
     ipp_t *response = cupsDoRequest(http, request, "/");
     
     if (!response)
