@@ -3076,32 +3076,66 @@ FFI_PLUGIN_EXPORT bool cups_set_job_priority(const char *printer_name, uint32_t 
         return false;
     }
     
+    char printer_uri[HTTP_MAX_URI];
+    httpAssembleURIf(HTTP_URI_CODING_ALL, printer_uri, sizeof(printer_uri), "ipp", NULL,
+                     cupsServer(), ippPort(), "/printers/%s", printer_name);
+
     char job_uri[HTTP_MAX_URI];
-    httpAssembleURIf(HTTP_URI_CODING_ALL, job_uri, sizeof(job_uri), "ipp", NULL, 
+    httpAssembleURIf(HTTP_URI_CODING_ALL, job_uri, sizeof(job_uri), "ipp", NULL,
                      cupsServer(), ippPort(), "/jobs/%u", job_id);
-    
+
+    const char *request_user = username ? username : cupsUser();
+    ipp_status_t primary_status = IPP_STATUS_OK;
+
+    // Primary request form: printer-uri + job-id. This is broadly accepted by CUPS.
     ipp_t *request = ippNewRequest(IPP_OP_SET_JOB_ATTRIBUTES);
-    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "job-uri", NULL, job_uri);
-    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, username ? username : cupsUser());
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", NULL, printer_uri);
+    ippAddInteger(request, IPP_TAG_OPERATION, IPP_TAG_INTEGER, "job-id", job_id);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, request_user);
     ippAddInteger(request, IPP_TAG_JOB, IPP_TAG_INTEGER, "job-priority", priority);
-    
-    ipp_t *response = cupsDoRequest(http, request, "/jobs/");
-    
+
+    ipp_t *response = cupsDoRequest(http, request, "/");
+
     if (!response)
     {
         set_last_error("Set job priority failed: %s", cupsLastErrorString());
         httpClose(http);
         return false;
     }
-    
-    ipp_status_t status = ippGetStatusCode(response);
-    bool success = (status <= IPP_OK_CONFLICT);
-    
+
+    primary_status = ippGetStatusCode(response);
+    bool success = (primary_status <= IPP_OK_CONFLICT);
+    ippDelete(response);
+
+    if (success)
+    {
+        httpClose(http);
+        return true;
+    }
+
+    // Some servers reject the first form but accept job-uri addressing.
+    request = ippNewRequest(IPP_OP_SET_JOB_ATTRIBUTES);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "job-uri", NULL, job_uri);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, request_user);
+    ippAddInteger(request, IPP_TAG_JOB, IPP_TAG_INTEGER, "job-priority", priority);
+
+    response = cupsDoRequest(http, request, "/jobs/");
+
+    if (!response)
+    {
+        set_last_error("Set job priority failed: %s", cupsLastErrorString());
+        httpClose(http);
+        return false;
+    }
+
+    ipp_status_t fallback_status = ippGetStatusCode(response);
+    success = (fallback_status <= IPP_OK_CONFLICT);
+
     if (!success)
     {
-        set_last_error("Set job priority failed with status: %s", ippErrorString(status));
+        set_last_error("Set job priority failed with status: %s (fallback status: %s)", ippErrorString(primary_status), ippErrorString(fallback_status));
     }
-    
+
     ippDelete(response);
     httpClose(http);
     return success;

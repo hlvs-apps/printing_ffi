@@ -285,8 +285,12 @@ class PrintingFfi {
     PdfPrintScaling scaling = PdfPrintScaling.fitToPrintableArea,
     int? copies,
     PageRange? pageRange,
+    int? priority,
     List<PrintOption> options = const [],
   }) async {
+    if (_isCups && priority != null && (priority < 1 || priority > 100)) {
+      throw PrintingFfiException('Priority must be between 1 and 100');
+    }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextPrintPdfRequestId++;
     final optionsMap = buildOptions(options);
@@ -295,6 +299,9 @@ class PrintingFfi {
     final finalOptions = {...optionsMap};
     if (scaling is PdfPrintScalingCustom) {
       finalOptions['custom-scale-factor'] = scaling.scale.toString();
+    }
+    if (_isCups && priority != null) {
+      finalOptions['job-priority'] = priority.toString();
     }
 
     final request = kDebugMode
@@ -369,9 +376,13 @@ class PrintingFfi {
     PdfPrintScaling scaling = PdfPrintScaling.fitToPrintableArea,
     int? copies,
     PageRange? pageRange,
+    int? priority,
     List<PrintOption> options = const [],
     Duration pollInterval = const Duration(seconds: 2),
   }) {
+    if (_isCups && priority != null && (priority < 1 || priority > 100)) {
+      throw PrintingFfiException('Priority must be between 1 and 100');
+    }
     return _streamJobStatus(
       printerName: printerName,
       pollInterval: pollInterval,
@@ -381,6 +392,9 @@ class PrintingFfi {
         final finalOptions = {...optionsMap};
         if (scaling is PdfPrintScalingCustom) {
           finalOptions['custom-scale-factor'] = scaling.scale.toString();
+        }
+        if (_isCups && priority != null) {
+          finalOptions['job-priority'] = priority.toString();
         }
         return _sendPdfJobRequest(
           printerName,
@@ -668,9 +682,7 @@ class PrintingFfi {
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
-    final request = kDebugMode 
-      ? CupsPrinterControlRequest(requestId, printerName, 'pause', null, username, password)
-      : _CupsPrinterControlRequest(requestId, printerName, 'pause', null, username, password);
+    final request = kDebugMode ? CupsPrinterControlRequest(requestId, printerName, 'pause', null, username, password) : _CupsPrinterControlRequest(requestId, printerName, 'pause', null, username, password);
     final Completer<bool> completer = Completer<bool>();
     _cupsPrinterControlRequests[requestId] = completer;
     helperIsolateSendPort.send(request);
@@ -693,9 +705,7 @@ class PrintingFfi {
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
-    final request = kDebugMode 
-      ? CupsPrinterControlRequest(requestId, printerName, 'resume', null, username, password)
-      : _CupsPrinterControlRequest(requestId, printerName, 'resume', null, username, password);
+    final request = kDebugMode ? CupsPrinterControlRequest(requestId, printerName, 'resume', null, username, password) : _CupsPrinterControlRequest(requestId, printerName, 'resume', null, username, password);
     final Completer<bool> completer = Completer<bool>();
     _cupsPrinterControlRequests[requestId] = completer;
     helperIsolateSendPort.send(request);
@@ -720,9 +730,7 @@ class PrintingFfi {
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
-    final request = kDebugMode 
-      ? CupsPrinterControlRequest(requestId, printerName, 'enable', null, username, password)
-      : _CupsPrinterControlRequest(requestId, printerName, 'enable', null, username, password);
+    final request = kDebugMode ? CupsPrinterControlRequest(requestId, printerName, 'enable', null, username, password) : _CupsPrinterControlRequest(requestId, printerName, 'enable', null, username, password);
     final Completer<bool> completer = Completer<bool>();
     _cupsPrinterControlRequests[requestId] = completer;
     helperIsolateSendPort.send(request);
@@ -748,9 +756,7 @@ class PrintingFfi {
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
-    final request = kDebugMode 
-      ? CupsPrinterControlRequest(requestId, printerName, 'disable', reason, username, password)
-      : _CupsPrinterControlRequest(requestId, printerName, 'disable', reason, username, password);
+    final request = kDebugMode ? CupsPrinterControlRequest(requestId, printerName, 'disable', reason, username, password) : _CupsPrinterControlRequest(requestId, printerName, 'disable', reason, username, password);
     final Completer<bool> completer = Completer<bool>();
     _cupsPrinterControlRequests[requestId] = completer;
     helperIsolateSendPort.send(request);
@@ -774,9 +780,7 @@ class PrintingFfi {
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
-    final request = kDebugMode 
-      ? CupsPrinterControlRequest(requestId, printerName, 'accept', null, username, password)
-      : _CupsPrinterControlRequest(requestId, printerName, 'accept', null, username, password);
+    final request = kDebugMode ? CupsPrinterControlRequest(requestId, printerName, 'accept', null, username, password) : _CupsPrinterControlRequest(requestId, printerName, 'accept', null, username, password);
     final Completer<bool> completer = Completer<bool>();
     _cupsPrinterControlRequests[requestId] = completer;
     helperIsolateSendPort.send(request);
@@ -801,9 +805,7 @@ class PrintingFfi {
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
-    final request = kDebugMode 
-      ? CupsPrinterControlRequest(requestId, printerName, 'reject', reason, username, password)
-      : _CupsPrinterControlRequest(requestId, printerName, 'reject', reason, username, password);
+    final request = kDebugMode ? CupsPrinterControlRequest(requestId, printerName, 'reject', reason, username, password) : _CupsPrinterControlRequest(requestId, printerName, 'reject', reason, username, password);
     final Completer<bool> completer = Completer<bool>();
     _cupsPrinterControlRequests[requestId] = completer;
     helperIsolateSendPort.send(request);
@@ -828,9 +830,7 @@ class PrintingFfi {
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsJobControlRequestId++;
-    final request = kDebugMode 
-      ? CupsJobControlRequest(requestId, printerName, jobId, 'hold', null, 0, username, password)
-      : _CupsJobControlRequest(requestId, printerName, jobId, 'hold', null, 0, username, password);
+    final request = kDebugMode ? CupsJobControlRequest(requestId, printerName, jobId, 'hold', null, 0, username, password) : _CupsJobControlRequest(requestId, printerName, jobId, 'hold', null, 0, username, password);
     final Completer<bool> completer = Completer<bool>();
     _cupsJobControlRequests[requestId] = completer;
     helperIsolateSendPort.send(request);
@@ -854,9 +854,7 @@ class PrintingFfi {
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsJobControlRequestId++;
-    final request = kDebugMode 
-      ? CupsJobControlRequest(requestId, printerName, jobId, 'release', null, 0, username, password)
-      : _CupsJobControlRequest(requestId, printerName, jobId, 'release', null, 0, username, password);
+    final request = kDebugMode ? CupsJobControlRequest(requestId, printerName, jobId, 'release', null, 0, username, password) : _CupsJobControlRequest(requestId, printerName, jobId, 'release', null, 0, username, password);
     final Completer<bool> completer = Completer<bool>();
     _cupsJobControlRequests[requestId] = completer;
     helperIsolateSendPort.send(request);
@@ -883,9 +881,7 @@ class PrintingFfi {
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsJobControlRequestId++;
-    final request = kDebugMode 
-      ? CupsJobControlRequest(requestId, sourcePrinter, jobId, 'move', destPrinter, 0, username, password)
-      : _CupsJobControlRequest(requestId, sourcePrinter, jobId, 'move', destPrinter, 0, username, password);
+    final request = kDebugMode ? CupsJobControlRequest(requestId, sourcePrinter, jobId, 'move', destPrinter, 0, username, password) : _CupsJobControlRequest(requestId, sourcePrinter, jobId, 'move', destPrinter, 0, username, password);
     final Completer<bool> completer = Completer<bool>();
     _cupsJobControlRequests[requestId] = completer;
     helperIsolateSendPort.send(request);
@@ -915,9 +911,7 @@ class PrintingFfi {
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsJobControlRequestId++;
-    final request = kDebugMode 
-      ? CupsJobControlRequest(requestId, printerName, jobId, 'priority', null, priority, username, password)
-      : _CupsJobControlRequest(requestId, printerName, jobId, 'priority', null, priority, username, password);
+    final request = kDebugMode ? CupsJobControlRequest(requestId, printerName, jobId, 'priority', null, priority, username, password) : _CupsJobControlRequest(requestId, printerName, jobId, 'priority', null, priority, username, password);
     final Completer<bool> completer = Completer<bool>();
     _cupsJobControlRequests[requestId] = completer;
     helperIsolateSendPort.send(request);
@@ -953,9 +947,7 @@ class PrintingFfi {
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsAttributeRequestId++;
-    final request = kDebugMode 
-      ? CupsAttributeRequest(requestId, printerName, [attributeName], username, password)
-      : _CupsAttributeRequest(requestId, printerName, [attributeName], username, password);
+    final request = kDebugMode ? CupsAttributeRequest(requestId, printerName, [attributeName], username, password) : _CupsAttributeRequest(requestId, printerName, [attributeName], username, password);
     final Completer<PrinterAttribute?> completer = Completer<PrinterAttribute?>();
     _cupsAttributeRequests[requestId] = completer;
     helperIsolateSendPort.send(request);
@@ -981,9 +973,7 @@ class PrintingFfi {
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsAttributeRequestId++;
-    final request = kDebugMode 
-      ? CupsAttributeRequest(requestId, printerName, attributeNames, username, password)
-      : _CupsAttributeRequest(requestId, printerName, attributeNames, username, password);
+    final request = kDebugMode ? CupsAttributeRequest(requestId, printerName, attributeNames, username, password) : _CupsAttributeRequest(requestId, printerName, attributeNames, username, password);
     final Completer<List<PrinterAttribute>> completer = Completer<List<PrinterAttribute>>();
     _cupsAttributesRequests[requestId] = completer;
     helperIsolateSendPort.send(request);
@@ -1066,7 +1056,6 @@ class PrintingFfi {
   final Map<int, Completer<PrinterAttribute?>> _cupsAttributeRequests = <int, Completer<PrinterAttribute?>>{};
   final Map<int, Completer<List<PrinterAttribute>>> _cupsAttributesRequests = <int, Completer<List<PrinterAttribute>>>{};
 
-
   Future<SendPort>? _helperIsolateSendPortFuture;
 
   void _failAllPendingRequests(Object error, [StackTrace? stackTrace]) {
@@ -1134,6 +1123,18 @@ class PrintingFfi {
     return _helperIsolateSendPortFuture!;
   }
 
+  Completer<T>? _takeRequestCompleter<T>(
+    Map<int, Completer<T>> requests,
+    int id,
+    String responseType,
+  ) {
+    final completer = requests.remove(id);
+    if (completer == null) {
+      debugPrint('printing_ffi: ignoring stale $responseType for request id $id');
+    }
+    return completer;
+  }
+
   void _handleMessage(dynamic data, {Completer<SendPort>? completer}) {
     if (data is SendPort) {
       if (completer != null && !completer.isCompleted) {
@@ -1170,45 +1171,42 @@ class PrintingFfi {
     }
 
     if (data is _PrintResponse) {
-      final Completer<bool> completer = _printRequests[data.id]!;
-      _printRequests.remove(data.id);
-      completer.complete(data.result);
+      final requestCompleter = _takeRequestCompleter(_printRequests, data.id, '_PrintResponse');
+      requestCompleter?.complete(data.result);
       return;
     }
     if (data is _PrintJobsResponse) {
-      final Completer<List<PrintJob>> completer = _printJobsRequests[data.id]!;
-      _printJobsRequests.remove(data.id);
-      completer.complete(data.jobs);
+      final requestCompleter = _takeRequestCompleter(_printJobsRequests, data.id, '_PrintJobsResponse');
+      requestCompleter?.complete(data.jobs);
       return;
     }
     if (data is _PrintJobActionResponse) {
-      final Completer<bool> completer = _printJobActionRequests[data.id]!;
-      _printJobActionRequests.remove(data.id);
-      completer.complete(data.result);
+      final requestCompleter = _takeRequestCompleter(_printJobActionRequests, data.id, '_PrintJobActionResponse');
+      requestCompleter?.complete(data.result);
       return;
     }
     if (data is _PrintPdfResponse) {
-      final Completer<bool> completer = _printPdfRequests[data.id]!;
-      _printPdfRequests.remove(data.id);
-      completer.complete(data.result);
+      final requestCompleter = _takeRequestCompleter(_printPdfRequests, data.id, '_PrintPdfResponse');
+      requestCompleter?.complete(data.result);
       return;
     }
     if (data is _GetCupsOptionsResponse) {
-      final Completer<List<CupsOptionModel>> completer = _getCupsOptionsRequests[data.id]!;
-      _getCupsOptionsRequests.remove(data.id);
-      completer.complete(data.options);
+      final requestCompleter = _takeRequestCompleter(_getCupsOptionsRequests, data.id, '_GetCupsOptionsResponse');
+      requestCompleter?.complete(data.options);
       return;
     }
     if (data is _GetWindowsCapsResponse) {
-      final Completer<WindowsPrinterCapabilitiesModel?> completer = _getWindowsCapsRequests[data.id]!;
-      _getWindowsCapsRequests.remove(data.id);
-      completer.complete(data.capabilities);
+      final requestCompleter = _takeRequestCompleter(_getWindowsCapsRequests, data.id, '_GetWindowsCapsResponse');
+      requestCompleter?.complete(data.capabilities);
       return;
     }
     if (data is _OpenPrinterPropertiesResponse) {
-      final Completer<PrinterPropertiesResult> completer = _openPrinterPropertiesRequests[data.id]!;
-      _openPrinterPropertiesRequests.remove(data.id);
-      completer.complete(data.result);
+      final requestCompleter = _takeRequestCompleter(
+        _openPrinterPropertiesRequests,
+        data.id,
+        '_OpenPrinterPropertiesResponse',
+      );
+      requestCompleter?.complete(data.result);
       return;
     }
     if (data is _SubmitJobResponse) {
@@ -1220,33 +1218,36 @@ class PrintingFfi {
       return;
     }
     if (data is _PrintFileWithDialogResponse) {
-      final Completer<bool> completer = _printPdfWithDialogRequests[data.id]!;
-      _printPdfWithDialogRequests.remove(data.id);
-      completer.complete(data.result);
+      final requestCompleter = _takeRequestCompleter(
+        _printPdfWithDialogRequests,
+        data.id,
+        '_PrintFileWithDialogResponse',
+      );
+      requestCompleter?.complete(data.result);
       return;
     }
     if (data is _CupsPrinterControlResponse) {
-      final Completer<bool> completer = _cupsPrinterControlRequests[data.id]!;
-      _cupsPrinterControlRequests.remove(data.id);
-      completer.complete(data.result);
+      final requestCompleter = _takeRequestCompleter(
+        _cupsPrinterControlRequests,
+        data.id,
+        '_CupsPrinterControlResponse',
+      );
+      requestCompleter?.complete(data.result);
       return;
     }
     if (data is _CupsJobControlResponse) {
-      final Completer<bool> completer = _cupsJobControlRequests[data.id]!;
-      _cupsJobControlRequests.remove(data.id);
-      completer.complete(data.result);
+      final requestCompleter = _takeRequestCompleter(_cupsJobControlRequests, data.id, '_CupsJobControlResponse');
+      requestCompleter?.complete(data.result);
       return;
     }
     if (data is _CupsAttributeResponse) {
-      final Completer<PrinterAttribute?> completer = _cupsAttributeRequests[data.id]!;
-      _cupsAttributeRequests.remove(data.id);
-      completer.complete(data.attribute);
+      final requestCompleter = _takeRequestCompleter(_cupsAttributeRequests, data.id, '_CupsAttributeResponse');
+      requestCompleter?.complete(data.attribute);
       return;
     }
     if (data is _CupsAttributesResponse) {
-      final Completer<List<PrinterAttribute>> completer = _cupsAttributesRequests[data.id]!;
-      _cupsAttributesRequests.remove(data.id);
-      completer.complete(data.attributes);
+      final requestCompleter = _takeRequestCompleter(_cupsAttributesRequests, data.id, '_CupsAttributesResponse');
+      requestCompleter?.complete(data.attributes);
       return;
     }
     if (data is _ErrorResponse) {
@@ -1441,10 +1442,15 @@ class _PrintFileWithDialogResponse {
 
 class _ErrorResponse {
   final int id;
-  final Object error;
-  final StackTrace? stackTrace;
+  final String errorMessage;
+  final bool isPrintingFfiException;
+  final String? serializedStackTrace;
 
-  const _ErrorResponse(this.id, this.error, this.stackTrace);
+  _ErrorResponse(this.id, Object error, StackTrace? stackTrace) : errorMessage = error is PrintingFfiException ? error.message : error.toString(), isPrintingFfiException = error is PrintingFfiException, serializedStackTrace = stackTrace?.toString();
+
+  Object get error => isPrintingFfiException ? PrintingFfiException(errorMessage) : Exception(errorMessage);
+
+  StackTrace? get stackTrace => serializedStackTrace == null ? null : StackTrace.fromString(serializedStackTrace!);
 }
 
 class _DisposeRequest {
@@ -2081,7 +2087,15 @@ void _helperIsolateEntryPoint(SendPort sendPort) {
                 sendPort.send(_CupsJobControlResponse(data.id, true));
               } else {
                 final errorMsg = getLastError().toDartString();
-                sendPort.send(_ErrorResponse(data.id, PrintingFfiException(errorMsg), StackTrace.current));
+                // Some CUPS servers do not allow changing job-priority for active jobs.
+                // Treat this as an unsupported operation rather than a hard exception.
+                final isUnsupportedPriorityChange =
+                    data.action == 'priority' && errorMsg.contains('client-error-not-possible');
+                if (isUnsupportedPriorityChange) {
+                  sendPort.send(_CupsJobControlResponse(data.id, false));
+                } else {
+                  sendPort.send(_ErrorResponse(data.id, PrintingFfiException(errorMsg), StackTrace.current));
+                }
               }
             } finally {
               malloc.free(namePtr);
@@ -2097,7 +2111,7 @@ void _helperIsolateEntryPoint(SendPort sendPort) {
             final namePtr = data.printerName.toNativeUtf8().cast<Char>();
             final usernamePtr = data.username?.toNativeUtf8().cast<Char>() ?? nullptr;
             final passwordPtr = data.password?.toNativeUtf8().cast<Char>() ?? nullptr;
-            
+
             try {
               if (data.attributeNames.length == 1) {
                 // Single attribute request
@@ -2112,10 +2126,10 @@ void _helperIsolateEntryPoint(SendPort sendPort) {
                       final attr = attrPtr.ref;
                       final name = attr.attribute_name.cast<Utf8>().toDartString();
                       final valueCount = attr.value_count;
-                      
+
                       String? singleValue;
                       List<String>? arrayValues;
-                      
+
                       if (valueCount == 1 && attr.attribute_value != nullptr) {
                         singleValue = attr.attribute_value.cast<Utf8>().toDartString();
                       } else if (valueCount > 1 && attr.array_values != nullptr) {
@@ -2127,7 +2141,7 @@ void _helperIsolateEntryPoint(SendPort sendPort) {
                           }
                         }
                       }
-                      
+
                       final printerAttr = PrinterAttribute(
                         name: name,
                         value: singleValue,
@@ -2150,15 +2164,9 @@ void _helperIsolateEntryPoint(SendPort sendPort) {
                   for (int i = 0; i < numAttributes; i++) {
                     attrNamesPtr[i] = data.attributeNames[i].toNativeUtf8().cast<Char>();
                   }
-                  
-                  final attrListPtr = bindings.cups_get_printer_attributes(
-                    namePtr, 
-                    attrNamesPtr.cast(), 
-                    numAttributes, 
-                    usernamePtr, 
-                    passwordPtr
-                  );
-                  
+
+                  final attrListPtr = bindings.cups_get_printer_attributes(namePtr, attrNamesPtr.cast(), numAttributes, usernamePtr, passwordPtr);
+
                   if (attrListPtr == nullptr) {
                     final errorMsg = getLastError().toDartString();
                     sendPort.send(_ErrorResponse(data.id, PrintingFfiException(errorMsg), StackTrace.current));
@@ -2166,15 +2174,15 @@ void _helperIsolateEntryPoint(SendPort sendPort) {
                     try {
                       final attrList = attrListPtr.ref;
                       final attributes = <PrinterAttribute>[];
-                      
+
                       for (int i = 0; i < attrList.count; i++) {
                         final attr = attrList.attributes[i];
                         final name = attr.attribute_name.cast<Utf8>().toDartString();
                         final valueCount = attr.value_count;
-                        
+
                         String? singleValue;
                         List<String>? arrayValues;
-                        
+
                         if (valueCount == 1 && attr.attribute_value != nullptr) {
                           singleValue = attr.attribute_value.cast<Utf8>().toDartString();
                         } else if (valueCount > 1 && attr.array_values != nullptr) {
@@ -2186,15 +2194,17 @@ void _helperIsolateEntryPoint(SendPort sendPort) {
                             }
                           }
                         }
-                        
-                        attributes.add(PrinterAttribute(
-                          name: name,
-                          value: singleValue,
-                          values: arrayValues,
-                          valueCount: valueCount,
-                        ));
+
+                        attributes.add(
+                          PrinterAttribute(
+                            name: name,
+                            value: singleValue,
+                            values: arrayValues,
+                            valueCount: valueCount,
+                          ),
+                        );
                       }
-                      
+
                       sendPort.send(_CupsAttributesResponse(data.id, attributes));
                     } finally {
                       bindings.free_printer_attribute_list(attrListPtr);
@@ -2270,7 +2280,7 @@ class PrintResponse extends _PrintResponse {
 
 @visibleForTesting
 class ErrorResponse extends _ErrorResponse {
-  const ErrorResponse(super.id, super.error, super.stackTrace);
+  ErrorResponse(int id, Object error, [StackTrace? stackTrace]) : super(id, error, stackTrace);
 }
 
 @visibleForTesting

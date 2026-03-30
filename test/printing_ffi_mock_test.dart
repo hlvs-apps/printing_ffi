@@ -258,6 +258,21 @@ void main() {
       }
     });
 
+    test('cupsSetJobPriority completes false when helper isolate returns non-fatal unsupported response', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      when(() => mockSendPort.send(any())).thenAnswer((_) {});
+
+      final future = printingFfi.cupsSetJobPriority('Test Printer', 123, 80);
+
+      await Future.microtask(() {});
+      final captured = verify(() => mockSendPort.send(captureAny(that: isA<CupsJobControlRequest>()))).captured;
+      final request = captured.last as CupsJobControlRequest;
+      printingFfi.handleIsolateMessageForTest(CupsJobControlResponse(request.id, false));
+
+      await expectLater(future, completion(isFalse));
+      debugDefaultTargetPlatformOverride = null;
+    });
+
     test('listPrintJobs returns an empty list when no jobs are present', () async {
       // Arrange
       when(() => mockSendPort.send(any())).thenAnswer((_) {});
@@ -318,6 +333,7 @@ void main() {
     test('printPdf sends correct request and completes on success response', () async {
       // Arrange
       when(() => mockSendPort.send(any())).thenAnswer((_) {});
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
 
       // Act
       final future = printingFfi.printPdf(
@@ -327,6 +343,7 @@ void main() {
         scaling: PdfPrintScaling.actualSize,
         copies: 2,
         pageRange: PageRange.parse('1-2'),
+        priority: 80,
         options: [const ColorModeOption(ColorMode.monochrome)],
       );
 
@@ -346,6 +363,40 @@ void main() {
       expect(request.copies, 2);
       expect(request.pageRange, '1-2');
       expect(request.options, containsPair('color-mode', 'monochrome'));
+      expect(request.options, containsPair('job-priority', '80'));
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    test('printPdf ignores priority option on Windows', () async {
+      when(() => mockSendPort.send(any())).thenAnswer((_) {});
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+
+      final future = printingFfi.printPdf(
+        'Test Printer',
+        '/path/to/doc.pdf',
+        priority: 80,
+      );
+
+      await Future.microtask(() {});
+      final captured = verify(() => mockSendPort.send(captureAny())).captured;
+      final request = captured.last as PrintPdfRequest;
+      printingFfi.handleIsolateMessageForTest(PrintPdfResponse(request.id, true));
+      final result = await future;
+
+      expect(result, isTrue);
+      expect(request.options?.containsKey('job-priority'), isFalse);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    test('printPdf throws on invalid priority range for CUPS platforms', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+
+      expect(
+        () => printingFfi.printPdf('Test Printer', '/path/to/doc.pdf', priority: 101),
+        throwsA(isA<PrintingFfiException>()),
+      );
+
+      debugDefaultTargetPlatformOverride = null;
     });
 
     test('printPdf throws an exception on error response', () async {
