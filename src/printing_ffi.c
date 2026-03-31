@@ -2560,18 +2560,10 @@ static ipp_t *create_ipp_request(ipp_op_t op, const char *printer_name, const ch
         return NULL;
     }
     
-    // Build printer URI
-    const char *device_uri = cupsGetOption("device-uri", dest->num_options, dest->options);
-    if (device_uri)
-    {
-        snprintf(uri, sizeof(uri), "%s", device_uri);
-    }
-    else
-    {
-        httpAssembleURIf(HTTP_URI_CODING_ALL, uri, sizeof(uri), "ipp", NULL, 
-                         cupsServer(), ippPort(), "/printers/%s", printer_name);
-    }
-    
+    // Build a CUPS queue URI for IPP operations (device-uri is not valid here).
+    httpAssembleURIf(HTTP_URI_CODING_ALL, uri, sizeof(uri), "ipp", NULL,
+                     cupsServer(), ippPort(), "/printers/%s", dest->name);
+
     cupsFreeDests(num_dests, dests);
     
     // Set authentication if provided
@@ -2609,10 +2601,10 @@ static ipp_t *create_ipp_request(ipp_op_t op, const char *printer_name, const ch
 }
 
 // Helper to execute IPP request and check response
-static bool execute_ipp_request(http_t *http, ipp_t *request, const char *operation_name)
+static bool execute_ipp_request(http_t *http, ipp_t *request, const char *operation_name, const char *resource_path)
 {
-    ipp_t *response = cupsDoRequest(http, request, "/");
-    
+    ipp_t *response = cupsDoRequest(http, request, resource_path);
+
     if (!response)
     {
         set_last_error("%s failed: %s", operation_name, cupsLastErrorString());
@@ -2653,7 +2645,7 @@ FFI_PLUGIN_EXPORT bool cups_pause_printer(const char *printer_name, const char *
     if (!request)
         return false;
     
-    return execute_ipp_request(http, request, "Pause printer");
+    return execute_ipp_request(http, request, "Pause printer", "/admin/");
 #endif
 }
 
@@ -2676,7 +2668,7 @@ FFI_PLUGIN_EXPORT bool cups_resume_printer(const char *printer_name, const char 
     if (!request)
         return false;
     
-    return execute_ipp_request(http, request, "Resume printer");
+    return execute_ipp_request(http, request, "Resume printer", "/admin/");
 #endif
 }
 
@@ -2702,7 +2694,7 @@ FFI_PLUGIN_EXPORT bool cups_enable_printer(const char *printer_name, const char 
     if (!request)
         return false;
 
-    return execute_ipp_request(http, request, "Enable printer");
+    return execute_ipp_request(http, request, "Enable printer", "/admin/");
 #endif
 }
 
@@ -2802,7 +2794,7 @@ FFI_PLUGIN_EXPORT bool cups_accept_jobs(const char *printer_name, const char *us
     if (!request)
         return false;
     
-    return execute_ipp_request(http, request, "Accept jobs");
+    return execute_ipp_request(http, request, "Accept jobs", "/admin/");
 #endif
 }
 
