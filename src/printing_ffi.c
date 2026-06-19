@@ -1552,15 +1552,23 @@ FFI_PLUGIN_EXPORT JobList *get_print_jobs(const char *printer_name)
     return list;
 #else // macOS / Linux
     cups_job_t *jobs;
-    LOG("Calling cupsGetJobs for active jobs");
-    int num_jobs = cupsGetJobs(&jobs, printer_name, 1, CUPS_WHICHJOBS_ACTIVE);
+    // Query ALL users' jobs (my_jobs = 0), not only the querying CUPS user's.
+    // The host app may run as a root daemon whose CUPS user does not match the
+    // job's recorded owner; with my_jobs = 1 those jobs are invisible, so a
+    // caller correlating jobs (e.g. by title/token) never sees them advance and
+    // the queue appears frozen. CUPS_WHICHJOBS_ALL (vs ACTIVE) additionally
+    // returns COMPLETED jobs so the caller can observe a job reach the
+    // `completed` state instead of having it silently vanish from the list.
+    // Safe: callers already filter the returned list by their own job title.
+    LOG("Calling cupsGetJobs for all jobs (active + completed, all users)");
+    int num_jobs = cupsGetJobs(&jobs, printer_name, 0, CUPS_WHICHJOBS_ALL);
     if (num_jobs <= 0)
     {
         cupsFreeJobs(num_jobs, jobs);
         return list;
     }
 
-    LOG("Found %d active jobs on CUPS-based system", num_jobs);
+    LOG("Found %d jobs on CUPS-based system", num_jobs);
     list->count = num_jobs;
     list->jobs = (JobInfo *)malloc(num_jobs * sizeof(JobInfo));
     if (!list->jobs)
