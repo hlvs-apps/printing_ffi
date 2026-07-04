@@ -705,5 +705,33 @@ void main() {
         expect(request.docName, docName);
       });
     });
+
+    group('CUPS web-UI URL helpers', () {
+      test('return null when cupsd is not started (port null)', () {
+        printingFfi.debugCupsServerPort = null;
+        expect(printingFfi.cupsServerPort, isNull);
+        expect(printingFfi.cupsBaseUrl, isNull);
+        expect(printingFfi.cupsSettingsUrl, isNull);
+        expect(printingFfi.cupsPrinterSettingsUrl('any'), isNull);
+      });
+
+      test('build correct URLs from the running port', () {
+        printingFfi.debugCupsServerPort = 55813;
+        expect(printingFfi.cupsBaseUrl, 'http://127.0.0.1:55813');
+        expect(printingFfi.cupsSettingsUrl, 'http://127.0.0.1:55813/admin');
+        expect(
+          printingFfi.cupsPrinterSettingsUrl('DNP_dsrx1'),
+          'http://127.0.0.1:55813/printers/DNP_dsrx1',
+        );
+      });
+
+      test('percent-encode printer names with spaces / special chars', () {
+        printingFfi.debugCupsServerPort = 631;
+        expect(
+          printingFfi.cupsPrinterSettingsUrl('HP LaserJet/Pro'),
+          'http://127.0.0.1:631/printers/HP%20LaserJet%2FPro',
+        );
+      });
+    });
   });
 }

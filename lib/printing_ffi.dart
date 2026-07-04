@@ -352,6 +352,11 @@ class PrintingFfi {
   /// the port itself.
   int? get cupsServerPort => _cupsServerPort;
 
+  /// Test-only hook to set the cupsd port without booting a real server (which
+  /// requires Android + FFI), so the URL helpers can be unit-tested.
+  @visibleForTesting
+  set debugCupsServerPort(int? port) => _cupsServerPort = port;
+
   /// Base URL of the bundled cupsd web interface (`http://127.0.0.1:<port>`), or
   /// `null` if cupsd is not running. Append `/admin`, `/printers/<name>`, `/jobs/`,
   /// etc. to reach a specific page.
