@@ -786,6 +786,28 @@ Future<void> queryMultipleAttributes() async {
   }
 }
 
+// Discover EVERY attribute a printer exposes (no need to know the names).
+// Sends an IPP Get-Printer-Attributes request with `requested-attributes = all`.
+Future<void> discoverAllAttributes() async {
+  try {
+    List<PrinterAttribute> attributes =
+        await printingFfi.cupsGetAllPrinterAttributes('Office_Printer');
+
+    print('Supported attribute names (${attributes.length}):');
+    for (var attr in attributes) {
+      if (attr.isSingleValue) {
+        print('  ${attr.name}: ${attr.value}');
+      } else if (attr.isMultiValue) {
+        print('  ${attr.name}: [${attr.values!.join(', ')}]');
+      } else {
+        print('  ${attr.name}');
+      }
+    }
+  } catch (e) {
+    print('Error listing attributes: $e');
+  }
+}
+
 // Comprehensive printer status check
 Future<void> comprehensivePrinterStatus() async {
   try {

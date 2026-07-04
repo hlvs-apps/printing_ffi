@@ -1364,6 +1364,40 @@ class PrintingFfi {
     return completer.future;
   }
 
+  /// Queries **all** attributes a CUPS printer exposes (CUPS only - macOS/Linux/Android).
+  ///
+  /// Unlike [cupsGetPrinterAttribute]/[cupsGetPrinterAttributes], you do not need
+  /// to know the attribute names in advance: this sends an IPP Get-Printer-Attributes
+  /// request with `requested-attributes = all` and returns every attribute in the
+  /// printer group, each as a [PrinterAttribute] carrying its name and value(s).
+  ///
+  /// Use it to discover the supported attribute names for a printer, e.g.:
+  /// ```dart
+  /// final attrs = await printingFfi.cupsGetAllPrinterAttributes('My_Printer');
+  /// for (final a in attrs) {
+  ///   print(a.name); // 'printer-state', 'media-supported', 'printer-resolution-supported', ...
+  /// }
+  /// ```
+  ///
+  /// [printerName]: The name of the printer.
+  /// [username]: Optional username for authentication.
+  /// [password]: Optional password for authentication.
+  ///
+  /// Returns the full list of [PrinterAttribute] objects (empty if the printer
+  /// reports none). Throws [PrintingFfiException] on error.
+  Future<List<PrinterAttribute>> cupsGetAllPrinterAttributes(String printerName, {String? username, String? password}) async {
+    if (!_isCups) {
+      throw PrintingFfiException('cupsGetAllPrinterAttributes is only supported on macOS, Linux, and Android');
+    }
+    final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
+    final int requestId = _nextCupsAttributeRequestId++;
+    final request = kDebugMode ? CupsAllAttributesRequest(requestId, printerName, username, password) : _CupsAllAttributesRequest(requestId, printerName, username, password);
+    final Completer<List<PrinterAttribute>> completer = Completer<List<PrinterAttribute>>();
+    _cupsAttributesRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    return completer.future;
+  }
+
   Future<int> _sendRawDataJobRequest(
     String printerName,
     Uint8List data, {
@@ -1921,6 +1955,15 @@ class _CupsAttributeRequest {
   final String? password;
 
   const _CupsAttributeRequest(this.id, this.printerName, this.attributeNames, this.username, this.password);
+}
+
+class _CupsAllAttributesRequest {
+  final int id;
+  final String printerName;
+  final String? username;
+  final String? password;
+
+  const _CupsAllAttributesRequest(this.id, this.printerName, this.username, this.password);
 }
 
 class _CupsAttributeResponse {
@@ -2700,6 +2743,66 @@ void _helperIsolateEntryPoint(SendPort sendPort) {
           } catch (e, s) {
             sendPort.send(_ErrorResponse(data.id, e, s));
           }
+        } else if (data is _CupsAllAttributesRequest) {
+          try {
+            final namePtr = data.printerName.toNativeUtf8().cast<Char>();
+            final usernamePtr = data.username?.toNativeUtf8().cast<Char>() ?? nullptr;
+            final passwordPtr = data.password?.toNativeUtf8().cast<Char>() ?? nullptr;
+
+            try {
+              final attrListPtr = bindings.cups_get_all_printer_attributes(namePtr, usernamePtr, passwordPtr);
+
+              if (attrListPtr == nullptr) {
+                final errorMsg = getLastError().toDartString();
+                sendPort.send(_ErrorResponse(data.id, PrintingFfiException(errorMsg), StackTrace.current));
+              } else {
+                try {
+                  final attrList = attrListPtr.ref;
+                  final attributes = <PrinterAttribute>[];
+
+                  for (int i = 0; i < attrList.count; i++) {
+                    final attr = attrList.attributes[i];
+                    final name = attr.attribute_name.cast<Utf8>().toDartString();
+                    final valueCount = attr.value_count;
+
+                    String? singleValue;
+                    List<String>? arrayValues;
+
+                    if (valueCount == 1 && attr.attribute_value != nullptr) {
+                      singleValue = attr.attribute_value.cast<Utf8>().toDartString();
+                    } else if (valueCount > 1 && attr.array_values != nullptr) {
+                      arrayValues = [];
+                      for (int j = 0; j < valueCount; j++) {
+                        final valuePtr = attr.array_values[j];
+                        if (valuePtr != nullptr) {
+                          arrayValues.add(valuePtr.cast<Utf8>().toDartString());
+                        }
+                      }
+                    }
+
+                    attributes.add(
+                      PrinterAttribute(
+                        name: name,
+                        value: singleValue,
+                        values: arrayValues,
+                        valueCount: valueCount,
+                      ),
+                    );
+                  }
+
+                  sendPort.send(_CupsAttributesResponse(data.id, attributes));
+                } finally {
+                  bindings.free_printer_attribute_list(attrListPtr);
+                }
+              }
+            } finally {
+              malloc.free(namePtr);
+              if (usernamePtr != nullptr) malloc.free(usernamePtr);
+              if (passwordPtr != nullptr) malloc.free(passwordPtr);
+            }
+          } catch (e, s) {
+            sendPort.send(_ErrorResponse(data.id, e, s));
+          }
         }
       });
 
@@ -2856,6 +2959,11 @@ class CupsJobControlResponse extends _CupsJobControlResponse {
 @visibleForTesting
 class CupsAttributeRequest extends _CupsAttributeRequest {
   const CupsAttributeRequest(super.id, super.printerName, super.attributeNames, super.username, super.password);
+}
+
+@visibleForTesting
+class CupsAllAttributesRequest extends _CupsAllAttributesRequest {
+  const CupsAllAttributesRequest(super.id, super.printerName, super.username, super.password);
 }
 
 @visibleForTesting

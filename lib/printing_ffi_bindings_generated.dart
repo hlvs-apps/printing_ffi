@@ -267,8 +267,21 @@ class PrintingFfiBindings {
   late final _get_last_errorPtr = _lookup<ffi.NativeFunction<ffi.Pointer<ffi.Char> Function()>>('get_last_error');
   late final _get_last_error = _get_last_errorPtr.asFunction<ffi.Pointer<ffi.Char> Function()>();
 
-  /// Android only: boots the bundled cupsd inside the app sandbox and points the
-  /// libcups client at it. Returns the chosen localhost port (>0) or <0 on error.
+  /// --- Android: bundled cupsd scheduler (runs inside the app sandbox, app uid) ---
+  /// These are no-ops / return errors on non-Android platforms.
+  ///
+  /// start_cups_server: boots the bundled cupsd from the app sandbox. It creates
+  /// the runtime dirs + config under `server_root`, builds the ServerBin symlink
+  /// farm pointing at the extracted lib*.so executables in `native_lib_dir`,
+  /// forks+execs `native_lib_dir/libcupsd.so`, waits until it answers IPP, then
+  /// points the libcups client at it (cupsSetServer 127.0.0.1:<port>).
+  /// server_root:    app-writable dir for config/spool/logs/state (e.g. filesDir/cups).
+  /// native_lib_dir: applicationInfo.nativeLibraryDir (where the lib*.so live).
+  /// data_dir:       dir containing share/cups/{mime,data,templates} extracted from assets.
+  /// doc_root:       DocumentRoot for the web interface (static index.html/css/images
+  /// extracted from assets). May be NULL/"" to disable the web UI.
+  /// Returns the chosen localhost port (>0) on success, or <0 on error
+  /// (get_last_error has details).
   int start_cups_server(
     ffi.Pointer<ffi.Char> server_root,
     ffi.Pointer<ffi.Char> native_lib_dir,
@@ -286,7 +299,7 @@ class PrintingFfiBindings {
   late final _start_cups_serverPtr = _lookup<ffi.NativeFunction<ffi.Int32 Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>>('start_cups_server');
   late final _start_cups_server = _start_cups_serverPtr.asFunction<int Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>();
 
-  /// Android only: terminates the bundled cupsd started by [start_cups_server].
+  /// stop_cups_server: terminates the cupsd child started by start_cups_server.
   void stop_cups_server() {
     return _stop_cups_server();
   }
@@ -294,8 +307,31 @@ class PrintingFfiBindings {
   late final _stop_cups_serverPtr = _lookup<ffi.NativeFunction<ffi.Void Function()>>('stop_cups_server');
   late final _stop_cups_server = _stop_cups_serverPtr.asFunction<void Function()>();
 
-  /// Android only: serves the app's USB fd to the forked DNP backend over an
-  /// AF_UNIX socket via SCM_RIGHTS. Returns 0 on success, -1 on error.
+  /// --- Android: USB file-descriptor delivery server (for the bundled Gutenprint
+  /// DNP dye-sub backend) ---
+  ///
+  /// The whole Flutter app (Dart + this C FFI + Kotlin) runs in ONE process, and
+  /// cupsd + its backends are children forked from it (start_cups_server). So a
+  /// USB fd opened by the app (Kotlin UsbDeviceConnection.getFileDescriptor()) is
+  /// valid in the app process, and this C code can hand it to the backend child
+  /// over an AF_UNIX socket via SCM_RIGHTS.
+  ///
+  /// The patched DNP backend (backend_common.c, #ifdef __ANDROID__) reads the env
+  /// var PRINTING_FFI_USB_FD_SOCK (a FILESYSTEM AF_UNIX socket path — the same one
+  /// start_cups_server wires via a `SetEnv` in cups-files.conf), connects at JOB
+  /// DISPATCH, recvmsg's ONE data byte + a SCM_RIGHTS cmsg carrying a single USB
+  /// fd (CMSG_LEN(sizeof(int))), then libusb_set_option(NO_DEVICE_DISCOVERY) +
+  /// libusb_wrap_sys_device(fd). libusb OWNS the wrapped fd and closes it at job
+  /// end, so the server sends a dup() of a long-lived fd on EACH connection.
+  ///
+  /// start_usb_fd_server: unlink+create+bind+listen an AF_UNIX SOCK_STREAM socket
+  /// at `sock_path` (use cups_usb_fd_sock_path() / <serverRoot>/usbfd.sock), then
+  /// spawn a detached background thread that loops accept() and, for each
+  /// connection, sendmsg's one payload byte + a SCM_RIGHTS cmsg carrying
+  /// dup(usb_fd). One active server at a time (single printer). Does NOT take
+  /// ownership of `usb_fd` (Kotlin/UsbDeviceConnection owns it); it only sends
+  /// dups. Returns 0 on success, -1 on failure (get_last_error has details).
+  /// No-op returning -1 on non-Android platforms.
   int start_usb_fd_server(
     ffi.Pointer<ffi.Char> sock_path,
     int usb_fd,
@@ -309,7 +345,9 @@ class PrintingFfiBindings {
   late final _start_usb_fd_serverPtr = _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Char>, ffi.Int)>>('start_usb_fd_server');
   late final _start_usb_fd_server = _start_usb_fd_serverPtr.asFunction<int Function(ffi.Pointer<ffi.Char>, int)>();
 
-  /// Android only: stops the USB fd server started by [start_usb_fd_server].
+  /// stop_usb_fd_server: stops the accept thread and closes+unlinks the server
+  /// socket. Does NOT close the caller's original usb_fd (owned by Kotlin) — only
+  /// the dups the server created. Safe to call when no server is running.
   void stop_usb_fd_server() {
     return _stop_usb_fd_server();
   }
@@ -317,8 +355,11 @@ class PrintingFfiBindings {
   late final _stop_usb_fd_serverPtr = _lookup<ffi.NativeFunction<ffi.Void Function()>>('stop_usb_fd_server');
   late final _stop_usb_fd_server = _stop_usb_fd_serverPtr.asFunction<void Function()>();
 
-  /// Android only: the canonical AF_UNIX socket path (`<serverRoot>/usbfd.sock`)
-  /// the fd-server binds and the backend connects to. NULL until start_cups_server ran.
+  /// cups_usb_fd_sock_path: the canonical AF_UNIX socket path the fd-server binds,
+  /// the backend connects to, and the Kotlin layer must pass to
+  /// start_usb_fd_server — computed as <server_root>/usbfd.sock from the most
+  /// recent start_cups_server call. Returns a pointer to a static buffer, or NULL
+  /// if start_cups_server has not run yet (Android). NULL on other platforms.
   ffi.Pointer<ffi.Char> cups_usb_fd_sock_path() {
     return _cups_usb_fd_sock_path();
   }
@@ -326,8 +367,13 @@ class PrintingFfiBindings {
   late final _cups_usb_fd_sock_pathPtr = _lookup<ffi.NativeFunction<ffi.Pointer<ffi.Char> Function()>>('cups_usb_fd_sock_path');
   late final _cups_usb_fd_sock_path = _cups_usb_fd_sock_pathPtr.asFunction<ffi.Pointer<ffi.Char> Function()>();
 
-  /// Android only: generate a Gutenprint PPD for a DNP dye-sub `driver` id and return
-  /// its absolute on-device path (pass straight to add_cups_printer). NULL on failure.
+  /// generate_cups_dnp_ppd: (Android) generate — if not already present — a Gutenprint
+  /// PPD for a specific DNP/Citizen dye-sub `driver` id (the DnpUsbManager "make"
+  /// string, e.g. "dnp-dsrx1", "dnp-ds620"; matches src/xml/printers/dyesub.xml
+  /// <printer driver="..."/>) and return its ABSOLUTE on-device path. Pass that path
+  /// straight to add_cups_printer so it uploads the PPD file directly (no cups-driverd).
+  /// Requires start_cups_server to have run. Returns a pointer to a static buffer, or
+  /// NULL on failure (get_last_error). NULL / unsupported on non-Android platforms.
   ffi.Pointer<ffi.Char> generate_cups_dnp_ppd(
     ffi.Pointer<ffi.Char> driver,
   ) {
@@ -339,7 +385,13 @@ class PrintingFfiBindings {
   late final _generate_cups_dnp_ppdPtr = _lookup<ffi.NativeFunction<ffi.Pointer<ffi.Char> Function(ffi.Pointer<ffi.Char>)>>('generate_cups_dnp_ppd');
   late final _generate_cups_dnp_ppd = _generate_cups_dnp_ppdPtr.asFunction<ffi.Pointer<ffi.Char> Function(ffi.Pointer<ffi.Char>)>();
 
-  /// Creates/modifies a CUPS queue via CUPS-Add-Modify-Printer (macOS/Linux/Android).
+  /// add_cups_printer: creates/modifies a printer queue on the (local) CUPS server
+  /// via the CUPS-Add-Modify-Printer IPP operation. `ppd_or_model` may be:
+  /// - an ABSOLUTE path to a readable .ppd file -> the PPD FILE is uploaded
+  /// directly (the `lpadmin -P` mechanism); cups-driverd is NOT invoked;
+  /// - a model name such as "raw" (raw queue), "everywhere", or NULL;
+  /// - any other ppd-name string, resolved server-side by cups-driverd.
+  /// Returns true on success; get_last_error has details on failure.
   bool add_cups_printer(
     ffi.Pointer<ffi.Char> name,
     ffi.Pointer<ffi.Char> device_uri,
@@ -355,7 +407,10 @@ class PrintingFfiBindings {
   late final _add_cups_printerPtr = _lookup<ffi.NativeFunction<ffi.Bool Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>>('add_cups_printer');
   late final _add_cups_printer = _add_cups_printerPtr.asFunction<bool Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>();
 
-  /// Deletes a CUPS queue via CUPS-Delete-Printer (macOS/Linux/Android). Idempotent.
+  /// remove_cups_printer: deletes a printer queue on the (local) CUPS server via
+  /// the CUPS-Delete-Printer IPP operation. Idempotent: a "not found" result is
+  /// treated as success (so it is safe to call on USB detach for an already-gone
+  /// queue). Returns true on success; get_last_error has details on failure.
   bool remove_cups_printer(
     ffi.Pointer<ffi.Char> name,
   ) {
@@ -428,7 +483,7 @@ class PrintingFfiBindings {
 
   /// Submit an arbitrary file (image, PDF, ...) letting CUPS auto-detect the
   /// document format from the file contents. Returns the job id (>0) on success,
-  /// 0 on failure. Not supported on Windows (macOS/Linux/Android via CUPS).
+  /// 0 on failure. Not supported on Windows. (macOS/Linux/Android via CUPS.)
   int submit_file_job(
     ffi.Pointer<ffi.Char> printer_name,
     ffi.Pointer<ffi.Char> file_path,
@@ -447,9 +502,7 @@ class PrintingFfiBindings {
     );
   }
 
-  late final _submit_file_jobPtr = _lookup<ffi.NativeFunction<ffi.Int32 Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Int, ffi.Pointer<ffi.Pointer<ffi.Char>>, ffi.Pointer<ffi.Pointer<ffi.Char>>)>>(
-    'submit_file_job',
-  );
+  late final _submit_file_jobPtr = _lookup<ffi.NativeFunction<ffi.Int32 Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Int, ffi.Pointer<ffi.Pointer<ffi.Char>>, ffi.Pointer<ffi.Pointer<ffi.Char>>)>>('submit_file_job');
   late final _submit_file_job = _submit_file_jobPtr.asFunction<int Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, int, ffi.Pointer<ffi.Pointer<ffi.Char>>, ffi.Pointer<ffi.Pointer<ffi.Char>>)>();
 
   /// Function to initialize the PDFium library. Must be called once on startup on Windows.
@@ -648,7 +701,7 @@ class PrintingFfiBindings {
   late final _cups_set_job_priorityPtr = _lookup<ffi.NativeFunction<ffi.Bool Function(ffi.Pointer<ffi.Char>, ffi.Uint32, ffi.Int, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>>('cups_set_job_priority');
   late final _cups_set_job_priority = _cups_set_job_priorityPtr.asFunction<bool Function(ffi.Pointer<ffi.Char>, int, int, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>();
 
-  /// CUPS printer attribute query functions (macOS/Linux only)
+  /// CUPS printer attribute query functions (macOS/Linux/Android only)
   ffi.Pointer<PrinterAttribute> cups_get_printer_attribute(
     ffi.Pointer<ffi.Char> printer_name,
     ffi.Pointer<ffi.Char> attribute_name,
@@ -686,6 +739,27 @@ class PrintingFfiBindings {
     'cups_get_printer_attributes',
   );
   late final _cups_get_printer_attributes = _cups_get_printer_attributesPtr.asFunction<ffi.Pointer<PrinterAttributeList> Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Pointer<ffi.Char>>, int, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>();
+
+  /// cups_get_all_printer_attributes: query EVERY attribute the printer exposes.
+  /// Sends an IPP Get-Printer-Attributes request with requested-attributes="all"
+  /// and returns one PrinterAttribute per named attribute in the printer group
+  /// (name + value(s), same value formatting as the functions above). Use this to
+  /// discover which attribute names a printer supports without knowing them up
+  /// front. Returns NULL on error (get_last_error has details). Not on Windows.
+  ffi.Pointer<PrinterAttributeList> cups_get_all_printer_attributes(
+    ffi.Pointer<ffi.Char> printer_name,
+    ffi.Pointer<ffi.Char> username,
+    ffi.Pointer<ffi.Char> password,
+  ) {
+    return _cups_get_all_printer_attributes(
+      printer_name,
+      username,
+      password,
+    );
+  }
+
+  late final _cups_get_all_printer_attributesPtr = _lookup<ffi.NativeFunction<ffi.Pointer<PrinterAttributeList> Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>>('cups_get_all_printer_attributes');
+  late final _cups_get_all_printer_attributes = _cups_get_all_printer_attributesPtr.asFunction<ffi.Pointer<PrinterAttributeList> Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>();
 
   void free_printer_attribute(
     ffi.Pointer<PrinterAttribute> attribute,

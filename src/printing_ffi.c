@@ -652,7 +652,6 @@ FFI_PLUGIN_EXPORT int sum_long_running(int a, int b)
 
 FFI_PLUGIN_EXPORT PrinterList *get_printers(void)
 {
-    LOG("get_printers called");
     PrinterList *list = (PrinterList *)malloc(sizeof(PrinterList));
     if (!list)
         return NULL;
@@ -706,7 +705,6 @@ FFI_PLUGIN_EXPORT PrinterList *get_printers(void)
     return list;
 #else // macOS / Linux
     cups_dest_t *dests = NULL;
-    LOG("Calling cupsGetDests to find printers");
     int num_dests = cupsGetDests(&dests);
     if (num_dests <= 0)
     {
@@ -714,7 +712,6 @@ FFI_PLUGIN_EXPORT PrinterList *get_printers(void)
         return list; // Return empty list
     }
 
-    LOG("Found %d printers on CUPS-based system", num_dests);
     list->count = num_dests;
     list->printers = (PrinterInfo *)malloc(num_dests * sizeof(PrinterInfo));
     if (!list->printers)
@@ -771,7 +768,6 @@ FFI_PLUGIN_EXPORT void free_printer_list(PrinterList *printer_list)
 
 FFI_PLUGIN_EXPORT PrinterInfo *get_default_printer(void)
 {
-    LOG("get_default_printer called");
 #ifdef _WIN32
     DWORD len = 0;
     GetDefaultPrinterW(NULL, &len);
@@ -849,10 +845,8 @@ FFI_PLUGIN_EXPORT PrinterInfo *get_default_printer(void)
     const char *default_printer_name = cupsGetDefault();
     if (!default_printer_name)
     {
-        LOG("cupsGetDefault returned null, no default printer found.");
         return NULL;
     }
-    LOG("CUPS default printer name: %s", default_printer_name);
 
     cups_dest_t *dests = NULL;
     int num_dests = cupsGetDests(&dests);
@@ -904,7 +898,6 @@ FFI_PLUGIN_EXPORT void free_printer_info(PrinterInfo *printer_info)
 
 FFI_PLUGIN_EXPORT bool raw_data_to_printer(const char *printer_name, const uint8_t *data, int length, const char *doc_name, int num_options, const char **option_keys, const char **option_values)
 {
-    LOG("raw_data_to_printer called for printer: '%s', doc: '%s', length: %d", printer_name, doc_name, length);
 
     // Validate input parameters
     if (!printer_name || !data || length <= 0 || !doc_name)
@@ -1069,7 +1062,6 @@ FFI_PLUGIN_EXPORT bool raw_data_to_printer(const char *printer_name, const uint8
     }
     cupsFreeOptions(num_cups_options, options);
     unlink(temp_file);
-    LOG("raw_data_to_printer finished with job_id: %d", job_id);
     return job_id > 0;
 #endif
 }
@@ -1444,12 +1436,10 @@ static int32_t _print_pdf_job_win(const char *printer_name, const char *pdf_file
 
     if (submit_job)
     {
-        LOG("_print_pdf_job_win (submit) finished with result: %d, job_id: %d", success, job_id);
         return success ? job_id : 0;
     }
     else
     {
-        LOG("_print_pdf_job_win (print) finished with result: %d", success);
         return success ? 1 : 0;
     }
 }
@@ -2554,7 +2544,6 @@ FFI_PLUGIN_EXPORT bool remove_cups_printer(const char *name)
 
 FFI_PLUGIN_EXPORT bool print_pdf(const char *printer_name, const char *pdf_file_path, const char *doc_name, int scaling_mode, int copies, const char *page_range, int num_options, const char **option_keys, const char **option_values, const char *alignment)
 {
-    LOG("print_pdf called for printer: '%s', path: '%s', doc: '%s'", printer_name, pdf_file_path, doc_name);
 
     // Validate input parameters
     if (!printer_name || !pdf_file_path || !doc_name || copies <= 0)
@@ -2573,7 +2562,6 @@ FFI_PLUGIN_EXPORT bool print_pdf(const char *printer_name, const char *pdf_file_
     {
         if (option_keys && option_keys[i] && option_values && option_values[i])
         {
-            LOG("Adding CUPS option: %s=%s", option_keys[i], option_values[i]);
             num_cups_options = cupsAddOption(option_keys[i], option_values[i], num_cups_options, &options);
         }
     }
@@ -2584,7 +2572,6 @@ FFI_PLUGIN_EXPORT bool print_pdf(const char *printer_name, const char *pdf_file_
         LOG("cupsPrintFile failed, error: %s", cupsLastErrorString());
     }
     cupsFreeOptions(num_cups_options, options);
-    LOG("print_pdf finished with job_id: %d", job_id);
     return job_id > 0;
 #endif
 }
@@ -2599,11 +2586,9 @@ FFI_PLUGIN_EXPORT JobList *get_print_jobs(const char *printer_name)
 
     if (!printer_name)
     {
-        LOG("get_print_jobs called with null printer name");
         return list; // Return empty list
     }
 
-    LOG("get_print_jobs called for printer: '%s'", printer_name);
 #ifdef _WIN32
     HANDLE hPrinter;
     DWORD needed, returned;
@@ -2677,7 +2662,6 @@ FFI_PLUGIN_EXPORT JobList *get_print_jobs(const char *printer_name)
     // returns COMPLETED jobs so the caller can observe a job reach the
     // `completed` state instead of having it silently vanish from the list.
     // Safe: callers already filter the returned list by their own job title.
-    LOG("Calling cupsGetJobs for all jobs (active + completed, all users)");
     int num_jobs = cupsGetJobs(&jobs, printer_name, 0, CUPS_WHICHJOBS_ALL);
     if (num_jobs <= 0)
     {
@@ -2685,7 +2669,6 @@ FFI_PLUGIN_EXPORT JobList *get_print_jobs(const char *printer_name)
         return list;
     }
 
-    LOG("Found %d jobs on CUPS-based system", num_jobs);
     list->count = num_jobs;
     list->jobs = (JobInfo *)malloc(num_jobs * sizeof(JobInfo));
     if (!list->jobs)
@@ -2723,7 +2706,6 @@ FFI_PLUGIN_EXPORT void free_job_list(JobList *job_list)
 
 FFI_PLUGIN_EXPORT int open_printer_properties(const char *printer_name, intptr_t hwnd)
 {
-    LOG("open_printer_properties called for printer: '%s'", printer_name);
 #ifdef _WIN32
     if (!printer_name)
     {
@@ -2873,11 +2855,9 @@ FFI_PLUGIN_EXPORT bool pause_print_job(const char *printer_name, uint32_t job_id
 {
     if (!printer_name)
     {
-        LOG("pause_print_job called with null printer name");
         return false;
     }
 
-    LOG("pause_print_job called for printer: '%s', job_id: %u", printer_name, job_id);
 #ifdef _WIN32
     HANDLE hPrinter;
     wchar_t *printer_name_w = to_utf16(printer_name);
@@ -2907,11 +2887,9 @@ FFI_PLUGIN_EXPORT bool resume_print_job(const char *printer_name, uint32_t job_i
 {
     if (!printer_name)
     {
-        LOG("resume_print_job called with null printer name");
         return false;
     }
 
-    LOG("resume_print_job called for printer: '%s', job_id: %u", printer_name, job_id);
 #ifdef _WIN32
     HANDLE hPrinter;
     wchar_t *printer_name_w = to_utf16(printer_name);
@@ -2941,11 +2919,9 @@ FFI_PLUGIN_EXPORT bool cancel_print_job(const char *printer_name, uint32_t job_i
 {
     if (!printer_name)
     {
-        LOG("cancel_print_job called with null printer name");
         return false;
     }
 
-    LOG("cancel_print_job called for printer: '%s', job_id: %u", printer_name, job_id);
 #ifdef _WIN32
     HANDLE hPrinter;
     wchar_t *printer_name_w = to_utf16(printer_name);
@@ -2975,7 +2951,6 @@ FFI_PLUGIN_EXPORT CupsOptionList *get_supported_cups_options(const char *printer
 {
     if (!printer_name)
     {
-        LOG("get_supported_cups_options called with null printer name");
         CupsOptionList *list = (CupsOptionList *)malloc(sizeof(CupsOptionList));
         if (list)
         {
@@ -2985,7 +2960,6 @@ FFI_PLUGIN_EXPORT CupsOptionList *get_supported_cups_options(const char *printer
         return list;
     }
 
-    LOG("get_supported_cups_options called for printer: '%s'", printer_name);
     CupsOptionList *list = (CupsOptionList *)malloc(sizeof(CupsOptionList));
     if (!list)
         return NULL;
@@ -3002,7 +2976,6 @@ FFI_PLUGIN_EXPORT CupsOptionList *get_supported_cups_options(const char *printer
         LOG("cupsGetPPD failed for '%s', error: %s", printer_name, cupsLastErrorString());
         return list;
     }
-    LOG("Found PPD file: %s", ppd_filename);
 
     ppd_file_t *ppd = ppdOpenFile(ppd_filename);
     if (!ppd)
@@ -3024,12 +2997,10 @@ FFI_PLUGIN_EXPORT CupsOptionList *get_supported_cups_options(const char *printer
     {
         ppdClose(ppd);
         unlink(ppd_filename);
-        LOG("No UI options found in PPD");
         return list;
     }
 
     list->count = num_ui_options;
-    LOG("Found %d UI options in PPD", num_ui_options);
     list->options = (CupsOption *)malloc(num_ui_options * sizeof(CupsOption));
     if (!list->options)
     {
@@ -3078,7 +3049,6 @@ FFI_PLUGIN_EXPORT CupsOptionList *get_supported_cups_options(const char *printer
 
     ppdClose(ppd);
     unlink(ppd_filename); // Clean up temporary PPD file
-    LOG("get_supported_cups_options finished");
     return list;
 #endif
 }
@@ -3112,11 +3082,9 @@ FFI_PLUGIN_EXPORT WindowsPrinterCapabilities *get_windows_printer_capabilities(c
 {
     if (!printer_name)
     {
-        LOG("get_windows_printer_capabilities called with null printer name");
         return (WindowsPrinterCapabilities *)calloc(1, sizeof(WindowsPrinterCapabilities));
     }
 
-    LOG("get_windows_printer_capabilities called for printer: '%s'", printer_name);
 #ifndef _WIN32
     return (WindowsPrinterCapabilities *)calloc(1, sizeof(WindowsPrinterCapabilities));
 #else
@@ -3355,7 +3323,6 @@ FFI_PLUGIN_EXPORT void free_windows_printer_capabilities(WindowsPrinterCapabilit
 
 FFI_PLUGIN_EXPORT int32_t submit_raw_data_job(const char *printer_name, const uint8_t *data, int length, const char *doc_name, int num_options, const char **option_keys, const char **option_values)
 {
-    LOG("submit_raw_data_job called for printer: '%s', doc: '%s', length: %d", printer_name, doc_name, length);
 
     // Validate input parameters
     if (!printer_name || !data || length <= 0 || !doc_name)
@@ -3519,14 +3486,12 @@ FFI_PLUGIN_EXPORT int32_t submit_raw_data_job(const char *printer_name, const ui
     }
     cupsFreeOptions(num_cups_options, options);
     unlink(temp_file);
-    LOG("submit_raw_data_job finished with job_id: %d", job_id);
     return job_id > 0 ? job_id : 0;
 #endif
 }
 
 FFI_PLUGIN_EXPORT int32_t submit_pdf_job(const char *printer_name, const char *pdf_file_path, const char *doc_name, int scaling_mode, int copies, const char *page_range, int num_options, const char **option_keys, const char **option_values, const char *alignment)
 {
-    LOG("submit_pdf_job called for printer: '%s', path: '%s', doc: '%s'", printer_name, pdf_file_path, doc_name);
 
     // Validate input parameters
     if (!printer_name || !pdf_file_path || !doc_name || copies <= 0)
@@ -3554,7 +3519,6 @@ FFI_PLUGIN_EXPORT int32_t submit_pdf_job(const char *printer_name, const char *p
         LOG("cupsPrintFile failed, error: %s", cupsLastErrorString());
     }
     cupsFreeOptions(num_cups_options, options);
-    LOG("submit_pdf_job finished with job_id: %d", job_id);
     return job_id > 0 ? job_id : 0;
 #endif
 }
@@ -3566,7 +3530,6 @@ FFI_PLUGIN_EXPORT int32_t submit_pdf_job(const char *printer_name, const char *p
 // failure (get_last_error has details). Not supported on Windows (returns 0).
 FFI_PLUGIN_EXPORT int32_t submit_file_job(const char *printer_name, const char *file_path, const char *doc_name, int num_options, const char **option_keys, const char **option_values)
 {
-    LOG("submit_file_job called for printer: '%s', path: '%s', doc: '%s'", printer_name, file_path, doc_name);
 
     if (!printer_name || !file_path || !doc_name)
     {
@@ -3598,7 +3561,6 @@ FFI_PLUGIN_EXPORT int32_t submit_file_job(const char *printer_name, const char *
         LOG("cupsPrintFile failed, error: %s", cupsLastErrorString());
     }
     cupsFreeOptions(num_cups_options, options);
-    LOG("submit_file_job finished with job_id: %d", job_id);
     return job_id > 0 ? job_id : 0;
 #endif
 }
@@ -3611,7 +3573,6 @@ FFI_PLUGIN_EXPORT bool print_file_with_dialog(const char *file_path, const char 
         return false;
     }
 
-    LOG("print_file_with_dialog called for path: '%s'", file_path);
 
 #ifdef _WIN32
     wchar_t *file_path_w = to_utf16(file_path);
@@ -3814,7 +3775,6 @@ FFI_PLUGIN_EXPORT bool cups_pause_printer(const char *printer_name, const char *
         return false;
     }
     
-    LOG("cups_pause_printer called for printer: '%s'", printer_name);
     
     http_t *http = NULL;
     ipp_t *request = create_ipp_request(IPP_OP_PAUSE_PRINTER, printer_name, username, password, &http);
@@ -3837,7 +3797,6 @@ FFI_PLUGIN_EXPORT bool cups_resume_printer(const char *printer_name, const char 
         return false;
     }
     
-    LOG("cups_resume_printer called for printer: '%s'", printer_name);
     
     http_t *http = NULL;
     ipp_t *request = create_ipp_request(IPP_OP_RESUME_PRINTER, printer_name, username, password, &http);
@@ -3860,7 +3819,6 @@ FFI_PLUGIN_EXPORT bool cups_enable_printer(const char *printer_name, const char 
         return false;
     }
     
-    LOG("cups_enable_printer called for printer: '%s'", printer_name);
 
     if (username)
         cupsSetUser(username);
@@ -3886,7 +3844,6 @@ FFI_PLUGIN_EXPORT bool cups_disable_printer(const char *printer_name, const char
         return false;
     }
     
-    LOG("cups_disable_printer called for printer: '%s'", printer_name);
     
     cups_dest_t *dests = NULL;
     int num_dests = cupsGetDests(&dests);
@@ -3960,7 +3917,6 @@ FFI_PLUGIN_EXPORT bool cups_accept_jobs(const char *printer_name, const char *us
         return false;
     }
     
-    LOG("cups_accept_jobs called for printer: '%s'", printer_name);
     
     if (username)
         cupsSetUser(username);
@@ -3986,7 +3942,6 @@ FFI_PLUGIN_EXPORT bool cups_reject_jobs(const char *printer_name, const char *re
         return false;
     }
     
-    LOG("cups_reject_jobs called for printer: '%s'", printer_name);
     
     if (username)
         cupsSetUser(username);
@@ -4050,7 +4005,6 @@ FFI_PLUGIN_EXPORT bool cups_hold_job(const char *printer_name, uint32_t job_id, 
         return false;
     }
     
-    LOG("cups_hold_job called for printer: '%s', job_id: %u", printer_name, job_id);
     
     if (username)
         cupsSetUser(username);
@@ -4109,7 +4063,6 @@ FFI_PLUGIN_EXPORT bool cups_release_job(const char *printer_name, uint32_t job_i
         return false;
     }
     
-    LOG("cups_release_job called for printer: '%s', job_id: %u", printer_name, job_id);
     
     if (username)
         cupsSetUser(username);
@@ -4165,7 +4118,6 @@ FFI_PLUGIN_EXPORT bool cups_move_job(const char *source_printer, uint32_t job_id
         return false;
     }
     
-    LOG("cups_move_job called: job_id=%u from '%s' to '%s'", job_id, source_printer, dest_printer);
     
     if (username)
         cupsSetUser(username);
@@ -4232,7 +4184,6 @@ FFI_PLUGIN_EXPORT bool cups_set_job_priority(const char *printer_name, uint32_t 
         return false;
     }
     
-    LOG("cups_set_job_priority called: job_id=%u, priority=%d", job_id, priority);
     
     if (username)
         cupsSetUser(username);
@@ -4314,6 +4265,63 @@ FFI_PLUGIN_EXPORT bool cups_set_job_priority(const char *printer_name, uint32_t 
 // CUPS Printer Attribute Query Functions (macOS/Linux only)
 // ============================================================================
 
+#ifndef _WIN32
+// Convert a single value (at `index`) of an IPP attribute to a freshly malloc'd
+// C string. Handles the common CUPS value tags — including range, resolution and
+// the out-of-band tags surfaced by a full "all" attribute dump — and falls back
+// to the tag's human name (e.g. "no-value", "collection") for anything else.
+// Never returns NULL except on strdup OOM.
+static char *ipp_attr_value_to_string(ipp_attribute_t *attr, int index)
+{
+    ipp_tag_t value_tag = ippGetValueTag(attr);
+    char buffer[256];
+
+    switch (value_tag)
+    {
+        case IPP_TAG_INTEGER:
+        case IPP_TAG_ENUM:
+            snprintf(buffer, sizeof(buffer), "%d", ippGetInteger(attr, index));
+            return strdup(buffer);
+        case IPP_TAG_BOOLEAN:
+            return strdup(ippGetBoolean(attr, index) ? "true" : "false");
+        case IPP_TAG_RANGE:
+        {
+            int upper = 0;
+            int lower = ippGetRange(attr, index, &upper);
+            snprintf(buffer, sizeof(buffer), "%d-%d", lower, upper);
+            return strdup(buffer);
+        }
+        case IPP_TAG_RESOLUTION:
+        {
+            ipp_res_t units = IPP_RES_PER_INCH;
+            int yres = 0;
+            int xres = ippGetResolution(attr, index, &yres, &units);
+            snprintf(buffer, sizeof(buffer), "%dx%d%s", xres, yres, units == IPP_RES_PER_CM ? "dpcm" : "dpi");
+            return strdup(buffer);
+        }
+        case IPP_TAG_STRING:
+        case IPP_TAG_TEXT:
+        case IPP_TAG_TEXTLANG:
+        case IPP_TAG_NAME:
+        case IPP_TAG_NAMELANG:
+        case IPP_TAG_KEYWORD:
+        case IPP_TAG_URI:
+        case IPP_TAG_URISCHEME:
+        case IPP_TAG_CHARSET:
+        case IPP_TAG_LANGUAGE:
+        case IPP_TAG_MIMETYPE:
+        {
+            const char *value = ippGetString(attr, index, NULL);
+            return strdup(value ? value : "");
+        }
+        default:
+            // Out-of-band (no-value/unknown/unsupported) and structured tags
+            // (collection): report the tag name so callers still see the attribute.
+            return strdup(ippTagString(value_tag));
+    }
+}
+#endif
+
 FFI_PLUGIN_EXPORT PrinterAttribute *cups_get_printer_attribute(const char *printer_name, const char *attribute_name, const char *username, const char *password)
 {
 #ifdef _WIN32
@@ -4326,7 +4334,6 @@ FFI_PLUGIN_EXPORT PrinterAttribute *cups_get_printer_attribute(const char *print
         return NULL;
     }
     
-    LOG("cups_get_printer_attribute called: printer='%s', attribute='%s'", printer_name, attribute_name);
     
     if (username)
         cupsSetUser(username);
@@ -4508,7 +4515,6 @@ FFI_PLUGIN_EXPORT PrinterAttributeList *cups_get_printer_attributes(const char *
         return NULL;
     }
     
-    LOG("cups_get_printer_attributes called for printer: '%s', %d attributes", printer_name, num_attributes);
     
     if (username)
         cupsSetUser(username);
@@ -4691,6 +4697,139 @@ FFI_PLUGIN_EXPORT PrinterAttributeList *cups_get_printer_attributes(const char *
         }
     }
     
+    ippDelete(response);
+    httpClose(http);
+    return result;
+#endif
+}
+
+FFI_PLUGIN_EXPORT PrinterAttributeList *cups_get_all_printer_attributes(const char *printer_name, const char *username, const char *password)
+{
+#ifdef _WIN32
+    set_last_error("cups_get_all_printer_attributes is not supported on Windows");
+    return NULL;
+#else
+    (void)password;
+    if (!printer_name)
+    {
+        set_last_error("Printer name is required");
+        return NULL;
+    }
+
+
+    if (username)
+        cupsSetUser(username);
+
+    http_t *http = httpConnectEncrypt(cupsServer(), ippPort(), HTTP_ENCRYPT_IF_REQUESTED);
+    if (!http)
+    {
+        set_last_error("Failed to connect to CUPS server");
+        return NULL;
+    }
+
+    char uri[HTTP_MAX_URI];
+    httpAssembleURIf(HTTP_URI_CODING_ALL, uri, sizeof(uri), "ipp", NULL,
+                     cupsServer(), ippPort(), "/printers/%s", printer_name);
+
+    ipp_t *request = ippNewRequest(IPP_OP_GET_PRINTER_ATTRIBUTES);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", NULL, uri);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, username ? username : cupsUser());
+    // "all" asks the printer to return every attribute it exposes.
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_KEYWORD, "requested-attributes", NULL, "all");
+
+    ipp_t *response = cupsDoRequest(http, request, "/");
+
+    if (!response)
+    {
+        set_last_error("Get all printer attributes failed: %s", cupsLastErrorString());
+        httpClose(http);
+        return NULL;
+    }
+
+    ipp_status_t status = ippGetStatusCode(response);
+    if (status > IPP_OK_CONFLICT)
+    {
+        set_last_error("Get all printer attributes failed with status: %s", ippErrorString(status));
+        ippDelete(response);
+        httpClose(http);
+        return NULL;
+    }
+
+    // First pass: count the named attributes in the printer group (skip the
+    // operation group and unnamed group separators).
+    int count = 0;
+    for (ipp_attribute_t *attr = ippFirstAttribute(response); attr != NULL; attr = ippNextAttribute(response))
+    {
+        if (ippGetGroupTag(attr) != IPP_TAG_PRINTER || ippGetName(attr) == NULL)
+            continue;
+        count++;
+    }
+
+    PrinterAttributeList *result = (PrinterAttributeList *)calloc(1, sizeof(PrinterAttributeList));
+    if (!result)
+    {
+        set_last_error("Out of memory allocating attribute list");
+        ippDelete(response);
+        httpClose(http);
+        return NULL;
+    }
+
+    result->count = count;
+    result->attributes = count > 0 ? (PrinterAttribute *)calloc(count, sizeof(PrinterAttribute)) : NULL;
+    if (count > 0 && !result->attributes)
+    {
+        set_last_error("Out of memory allocating attributes");
+        free(result);
+        ippDelete(response);
+        httpClose(http);
+        return NULL;
+    }
+
+    // Second pass: copy each attribute's name and value(s).
+    int i = 0;
+    for (ipp_attribute_t *attr = ippFirstAttribute(response); attr != NULL && i < count; attr = ippNextAttribute(response))
+    {
+        if (ippGetGroupTag(attr) != IPP_TAG_PRINTER)
+            continue;
+        const char *name = ippGetName(attr);
+        if (name == NULL)
+            continue;
+
+        result->attributes[i].attribute_name = strdup(name);
+
+        int value_count = ippGetCount(attr);
+        result->attributes[i].value_count = value_count;
+
+        if (value_count == 1)
+        {
+            result->attributes[i].attribute_value = ipp_attr_value_to_string(attr, 0);
+            result->attributes[i].array_values = NULL;
+        }
+        else if (value_count > 1)
+        {
+            result->attributes[i].attribute_value = NULL;
+            result->attributes[i].array_values = (char **)calloc(value_count, sizeof(char *));
+
+            if (result->attributes[i].array_values)
+            {
+                for (int j = 0; j < value_count; j++)
+                    result->attributes[i].array_values[j] = ipp_attr_value_to_string(attr, j);
+            }
+            else
+            {
+                // Allocation failed; degrade to an empty attribute rather than crash.
+                result->attributes[i].value_count = 0;
+            }
+        }
+        else
+        {
+            result->attributes[i].attribute_value = strdup("");
+            result->attributes[i].array_values = NULL;
+        }
+
+        i++;
+    }
+
     ippDelete(response);
     httpClose(http);
     return result;

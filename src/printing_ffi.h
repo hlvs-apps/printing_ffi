@@ -292,9 +292,17 @@ extern "C"
         PrinterAttribute *attributes;
     } PrinterAttributeList;
 
-    // CUPS printer attribute query functions (macOS/Linux only)
+    // CUPS printer attribute query functions (macOS/Linux/Android only)
     FFI_PLUGIN_EXPORT PrinterAttribute *cups_get_printer_attribute(const char *printer_name, const char *attribute_name, const char *username, const char *password);
     FFI_PLUGIN_EXPORT PrinterAttributeList *cups_get_printer_attributes(const char *printer_name, const char **attribute_names, int num_attributes, const char *username, const char *password);
+
+    // cups_get_all_printer_attributes: query EVERY attribute the printer exposes.
+    //   Sends an IPP Get-Printer-Attributes request with requested-attributes="all"
+    //   and returns one PrinterAttribute per named attribute in the printer group
+    //   (name + value(s), same value formatting as the functions above). Use this to
+    //   discover which attribute names a printer supports without knowing them up
+    //   front. Returns NULL on error (get_last_error has details). Not on Windows.
+    FFI_PLUGIN_EXPORT PrinterAttributeList *cups_get_all_printer_attributes(const char *printer_name, const char *username, const char *password);
     FFI_PLUGIN_EXPORT void free_printer_attribute(PrinterAttribute *attribute);
     FFI_PLUGIN_EXPORT void free_printer_attribute_list(PrinterAttributeList *attribute_list);
 
