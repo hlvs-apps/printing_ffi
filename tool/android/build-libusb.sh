@@ -45,7 +45,7 @@ SRC_DIR="$BUILD_DIR/libusb-${LU_VERSION}"
 
 # --- Android NDK toolchain (same recipe as build-cups.sh / build-gutenprint.sh)
 export NDK="${NDK:-/Users/henrisauer/Library/Android/sdk/ndk/27.0.12077973}"
-export TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/darwin-x86_64"
+source "$SCRIPT_DIR/_android-toolchain.sh"   # sets TOOLCHAIN + JOBS (portable host tag)
 export API="${API:-24}"
 export TARGET="${TARGET:-aarch64-linux-android}"
 export PATH="$TOOLCHAIN/bin:$PATH"
@@ -136,7 +136,7 @@ fi
 
 # --- build -----------------------------------------------------------------
 echo "==> Building libusb"
-( make -j"$(sysctl -n hw.ncpu)" || make ) 2>&1 | tee "$LOG_DIR/build.log"
+( make -j"$JOBS" || make ) 2>&1 | tee "$LOG_DIR/build.log"
 echo "==> Build finished"
 
 # --- stage (DESTDIR install into a temp prefix, then flatten into OUT) ------

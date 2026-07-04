@@ -52,7 +52,7 @@ TIFF_SRC="$BUILD_DIR/tiff-${TIFF_VERSION}"
 
 # --- Android NDK toolchain (same recipe as build-cups.sh) ------------------
 export NDK="${NDK:-/Users/henrisauer/Library/Android/sdk/ndk/27.0.12077973}"
-export TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/darwin-x86_64"
+source "$SCRIPT_DIR/_android-toolchain.sh"   # sets TOOLCHAIN + JOBS (portable host tag)
 export API="${API:-24}"
 export TARGET="${TARGET:-aarch64-linux-android}"
 export PATH="$TOOLCHAIN/bin:$PATH"
@@ -168,7 +168,7 @@ if [ ! -f "$OUT_DIR/lib/libjpeg.a" ]; then
       -DWITH_JAVA=OFF \
       -DCMAKE_INSTALL_LIBDIR=lib \
       "$JPEG_SRC" 2>&1 | tee "$LOG_DIR/jpeg-configure.log"
-    make -j"$(sysctl -n hw.ncpu)" jpeg-static 2>&1 | tee "$LOG_DIR/jpeg-build.log"
+    make -j"$JOBS" jpeg-static 2>&1 | tee "$LOG_DIR/jpeg-build.log"
     # `cmake --install` on the static-only target does not always stage headers;
     # stage the static lib + the 4 public headers explicitly (below), so don't
     # rely on it. Kept best-effort for completeness.
@@ -221,7 +221,7 @@ if [ ! -f "$OUT_DIR/lib/libpng16.a" ] && [ ! -f "$OUT_DIR/lib/libpng.a" ]; then
       CPPFLAGS="$CPPFLAGS -I$OUT_DIR/include" \
       LDFLAGS="$LDFLAGS -L$SYSROOT/usr/lib/$TARGET/$API" \
       2>&1 | tee "$LOG_DIR/png-configure.log"
-    make -j"$(sysctl -n hw.ncpu)" 2>&1 | tee "$LOG_DIR/png-build.log"
+    make -j"$JOBS" 2>&1 | tee "$LOG_DIR/png-build.log"
     make install 2>&1 | tee "$LOG_DIR/png-install.log"
   )
   echo "==> libpng staged"
@@ -253,7 +253,7 @@ if [ ! -f "$OUT_DIR/lib/libtiff.a" ]; then
       CPPFLAGS="$CPPFLAGS -I$OUT_DIR/include" \
       LDFLAGS="$LDFLAGS -L$OUT_DIR/lib -L$SYSROOT/usr/lib/$TARGET/$API" \
       2>&1 | tee "$LOG_DIR/tiff-configure.log"
-    make -j"$(sysctl -n hw.ncpu)" 2>&1 | tee "$LOG_DIR/tiff-build.log"
+    make -j"$JOBS" 2>&1 | tee "$LOG_DIR/tiff-build.log"
     make install 2>&1 | tee "$LOG_DIR/tiff-install.log"
   )
   echo "==> libtiff staged"

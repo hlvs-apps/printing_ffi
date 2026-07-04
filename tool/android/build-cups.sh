@@ -59,7 +59,7 @@ SRC_DIR="$BUILD_DIR/cups-${CUPS_VERSION}"
 
 # --- Android NDK toolchain -------------------------------------------------
 export NDK="${NDK:-/Users/henrisauer/Library/Android/sdk/ndk/27.0.12077973}"
-export TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/darwin-x86_64"
+source "$SCRIPT_DIR/_android-toolchain.sh"   # sets TOOLCHAIN + JOBS (portable host tag)
 export API="${API:-24}"
 export TARGET="${TARGET:-aarch64-linux-android}"
 export PATH="$TOOLCHAIN/bin:$PATH"
@@ -227,7 +227,7 @@ fi
 
 # --- build -----------------------------------------------------------------
 echo "==> Building CUPS"
-make -j"$(sysctl -n hw.ncpu)" || make    # fall back to serial on parallel race
+make -j"$JOBS" || make    # fall back to serial on parallel race
 
 echo "==> Build finished"
 

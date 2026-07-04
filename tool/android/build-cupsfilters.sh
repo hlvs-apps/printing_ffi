@@ -62,7 +62,7 @@ SRC_DIR="$BUILD_DIR/cups-filters-${CF_VERSION}"
 
 # --- Android NDK toolchain (same recipe as build-cups.sh) ------------------
 export NDK="${NDK:-/Users/henrisauer/Library/Android/sdk/ndk/27.0.12077973}"
-export TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/darwin-x86_64"
+source "$SCRIPT_DIR/_android-toolchain.sh"   # sets TOOLCHAIN + JOBS (portable host tag)
 export API="${API:-24}"
 export TARGET="${TARGET:-aarch64-linux-android}"
 export PATH="$TOOLCHAIN/bin:$PATH"
@@ -253,8 +253,8 @@ fi
 # Building specific targets means the poppler/qpdf/ghostscript-linking programs
 # (pdftoraster, pdftopdf, gstoraster, ...) are NEVER compiled or linked.
 echo "==> Building libcupsfilters.la + imagetoraster ONLY"
-make -j"$(sysctl -n hw.ncpu)" libcupsfilters.la 2>&1 | tee "$LOG_DIR/build-lib.log"
-make -j"$(sysctl -n hw.ncpu)" imagetoraster 2>&1 | tee "$LOG_DIR/build-imagetoraster.log"
+make -j"$JOBS" libcupsfilters.la 2>&1 | tee "$LOG_DIR/build-lib.log"
+make -j"$JOBS" imagetoraster 2>&1 | tee "$LOG_DIR/build-imagetoraster.log"
 
 BIN="$SRC_DIR/imagetoraster"
 # libtool may leave the real binary under .libs/
