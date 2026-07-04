@@ -55,7 +55,16 @@ flutter:
   plugin:
     platforms:
       android:
+        # Hybrid plugin: FFI for the CUPS/print ops (same C ABI as desktop) plus a
+        # Kotlin pluginClass (PrintingFfiPlugin) hosting the cups + USB MethodChannels
+        # and the usb_events EventChannel (bundled-cupsd asset extraction, DNP USB
+        # permission + fd handshake, and the foreground service). Auto-registered, so
+        # consumers add no Kotlin.
+        # NOTE: the package stays `com.example.printing_ffi` for now; renaming it to a
+        # real `dev.<...>` domain is a cosmetic follow-up (out of this stage's scope).
         ffiPlugin: true
+        package: com.example.printing_ffi
+        pluginClass: PrintingFfiPlugin
       linux:
         ffiPlugin: true
       macos:

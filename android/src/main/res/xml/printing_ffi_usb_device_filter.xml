@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DNP / Citizen dye-sub USB printers supported by the Gutenprint dnpds40 backend.
+
+  SOURCE: the backend's own device table `dnpcitizen_devices[]` in
+  tool/android/gutenprint/build/gutenprint-5.3.5/src/cups/backend_dnpds40.c
+  (~L4612-4635; struct device_id from backend_common.h:183). Gutenprint 5.3.5 does
+  NOT use USB_VID_*/USB_PID_* macros for dnpds40 — the VID/PIDs are raw hex literals
+  in that table. Android's <usb-device> matcher wants DECIMAL, so both are shown.
+
+  Two vendor IDs:
+    0x1343 (4931) — DNP / Citizen (shared, older models + Citizen-branded)
+    0x1452 (5202) — DNP (DS620 / DS820 / QW410)
+  (Commented-out-in-source Fujifilm 0x04cb has no assigned PID, so omitted.)
+
+  Kept in sync with DnpUsbManager.supported[]. This resource is referenced by the
+  consumer app's launcher <activity>:
+    <meta-data android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+               android:resource="@xml/printing_ffi_usb_device_filter" />
+-->
+<resources>
+    <!-- VID 0x1343 (4931) — DNP / Citizen shared vendor -->
+    <usb-device vendor-id="4931" product-id="2" />     <!-- 0x1343 0x0002 Citizen CW-01 / OP900 -->
+    <usb-device vendor-id="4931" product-id="3" />     <!-- 0x1343 0x0003 DNP DS40 / Citizen CX -->
+    <usb-device vendor-id="4931" product-id="4" />     <!-- 0x1343 0x0004 DNP DS80 / Citizen CW / Mitsubishi CP3800DW -->
+    <usb-device vendor-id="4931" product-id="5" />     <!-- 0x1343 0x0005 DNP DSRX1 / Citizen CY -->
+    <usb-device vendor-id="4931" product-id="6" />     <!-- 0x1343 0x0006 Citizen CW-02 / OP900ii -->
+    <usb-device vendor-id="4931" product-id="8" />     <!-- 0x1343 0x0008 DNP DS80DX -->
+    <usb-device vendor-id="4931" product-id="10" />    <!-- 0x1343 0x000a Citizen CX-02 -->
+    <usb-device vendor-id="4931" product-id="11" />    <!-- 0x1343 0x000b Citizen CX-02W -->
+    <usb-device vendor-id="4931" product-id="12" />    <!-- 0x1343 0x000c Citizen CZ-01 -->
+
+    <!-- VID 0x1452 (5202) — DNP -->
+    <usb-device vendor-id="5202" product-id="35585" /> <!-- 0x1452 0x8b01 DNP DS620 -->
+    <usb-device vendor-id="5202" product-id="36865" /> <!-- 0x1452 0x9001 DNP DS820 -->
+    <usb-device vendor-id="5202" product-id="37377" /> <!-- 0x1452 0x9201 DNP QW410 -->
+</resources>

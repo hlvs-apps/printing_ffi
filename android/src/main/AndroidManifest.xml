@@ -1,3 +1,40 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-  package="com.example.printing_ffi">
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- USB host access (DNP dye-sub over USB). required="false" so devices without
+         a USB host controller are NOT excluded from Play distribution; the plugin
+         checks host availability at runtime. Consumers that WANT to require it can
+         override with tools:replace. -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+
+    <!-- Foreground service so Android doesn't kill the app (and cupsd + fd-server +
+         the live UsbDeviceConnection) mid dye-sub job (many seconds). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- targetSdk 34+ requires a typed FGS permission. "connectedDevice" fits a USB
+         printer job (data exchange with an attached device). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Notification the FGS posts (Android 13+ requires the runtime grant too; the
+         plugin requests it at Activity attach — see PrintingFfiPlugin C10). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
+      cupsd exec's on-disk PIE lib*.so (cupsd, backends, filters), so the native
+      libraries MUST be extracted to disk: force extractNativeLibs="true".
+
+      MERGE CAVEAT (consumer-visible, like the gphoto plugin): an app that
+      intentionally sets android:extractNativeLibs="false" hits a manifest-merge
+      conflict and must add tools:replace="android:extractNativeLibs" itself. The
+      consumer app ALSO needs packaging { jniLibs { useLegacyPackaging = true } } in
+      its gradle (AGP default is false, which mmaps libs and leaves nothing to exec).
+    -->
+    <application android:extractNativeLibs="true">
+        <!-- Foreground service kept alive across a dye-sub USB job. The name is
+             package-relative (.DnpUsbForegroundService resolves to
+             com.example.printing_ffi.DnpUsbForegroundService, this module's package). -->
+        <service
+            android:name=".DnpUsbForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+    </application>
+
 </manifest>

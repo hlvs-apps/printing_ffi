@@ -12,6 +12,9 @@ buildscript {
     dependencies {
         // The Android Gradle Plugin knows how to build native code with the NDK.
         classpath("com.android.tools.build:gradle:8.9.1")
+        // Kotlin: this is now a hybrid FFI + method-channel plugin; PrintingFfiPlugin.kt
+        // (FlutterPlugin + ActivityAware) needs the Kotlin Gradle plugin to compile.
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.0")
     }
 }
 
@@ -23,6 +26,7 @@ rootProject.allprojects {
 }
 
 apply plugin: "com.android.library"
+apply plugin: "kotlin-android"
 
 // ---------------------------------------------------------------------------
 // Native build strategy (source-build, chosen decision D1):
@@ -73,6 +77,12 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
+    }
+
+    // Match compileOptions (VERSION_11) so the Kotlin plugin glue compiles against the
+    // same JVM target as the Java sources.
+    kotlinOptions {
+        jvmTarget = "11"
     }
 
     defaultConfig {
