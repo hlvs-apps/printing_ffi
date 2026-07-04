@@ -110,12 +110,20 @@ class PrintingFfi {
   }
 
   /// A helper to determine if the current platform is CUPS-based, respecting test overrides.
+  ///
+  /// Android is CUPS-based too: the plugin boots a bundled cupsd and the libcups
+  /// client (the same C used on macOS/Linux) targets it via `cupsSetServer` on the
+  /// root isolate and `CUPS_SERVER=127.0.0.1:<port>` (set by [startCupsServer]) for
+  /// the helper isolate. So the CUPS IPP ops — reading printer attributes/supported
+  /// options, job control, printer enable/disable — work on Android once cupsd is up.
   bool get _isCups {
     final isTesting = kDebugMode && Platform.environment.containsKey('FLUTTER_TEST');
     if (isTesting) {
-      return defaultTargetPlatform == TargetPlatform.macOS || defaultTargetPlatform == TargetPlatform.linux;
+      return defaultTargetPlatform == TargetPlatform.macOS ||
+          defaultTargetPlatform == TargetPlatform.linux ||
+          defaultTargetPlatform == TargetPlatform.android;
     }
-    return Platform.isMacOS || Platform.isLinux;
+    return Platform.isMacOS || Platform.isLinux || Platform.isAndroid;
   }
 
   /// Internal constructor for creating the singleton instance.
@@ -1054,7 +1062,7 @@ class PrintingFfi {
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsPausePrinter(String printerName, {String? username, String? password}) async {
     if (!_isCups) {
-      throw PrintingFfiException('cupsPausePrinter is only supported on macOS and Linux');
+      throw PrintingFfiException('cupsPausePrinter is only supported on macOS, Linux, and Android');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
@@ -1077,7 +1085,7 @@ class PrintingFfi {
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsResumePrinter(String printerName, {String? username, String? password}) async {
     if (!_isCups) {
-      throw PrintingFfiException('cupsResumePrinter is only supported on macOS and Linux');
+      throw PrintingFfiException('cupsResumePrinter is only supported on macOS, Linux, and Android');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
@@ -1102,7 +1110,7 @@ class PrintingFfi {
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsEnablePrinter(String printerName, {String? username, String? password}) async {
     if (!_isCups) {
-      throw PrintingFfiException('cupsEnablePrinter is only supported on macOS and Linux');
+      throw PrintingFfiException('cupsEnablePrinter is only supported on macOS, Linux, and Android');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
@@ -1128,7 +1136,7 @@ class PrintingFfi {
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsDisablePrinter(String printerName, {String? reason, String? username, String? password}) async {
     if (!_isCups) {
-      throw PrintingFfiException('cupsDisablePrinter is only supported on macOS and Linux');
+      throw PrintingFfiException('cupsDisablePrinter is only supported on macOS, Linux, and Android');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
@@ -1152,7 +1160,7 @@ class PrintingFfi {
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsAcceptJobs(String printerName, {String? username, String? password}) async {
     if (!_isCups) {
-      throw PrintingFfiException('cupsAcceptJobs is only supported on macOS and Linux');
+      throw PrintingFfiException('cupsAcceptJobs is only supported on macOS, Linux, and Android');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
@@ -1177,7 +1185,7 @@ class PrintingFfi {
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsRejectJobs(String printerName, {String? reason, String? username, String? password}) async {
     if (!_isCups) {
-      throw PrintingFfiException('cupsRejectJobs is only supported on macOS and Linux');
+      throw PrintingFfiException('cupsRejectJobs is only supported on macOS, Linux, and Android');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
@@ -1202,7 +1210,7 @@ class PrintingFfi {
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsHoldJob(String printerName, int jobId, {String? username, String? password}) async {
     if (!_isCups) {
-      throw PrintingFfiException('cupsHoldJob is only supported on macOS and Linux');
+      throw PrintingFfiException('cupsHoldJob is only supported on macOS, Linux, and Android');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsJobControlRequestId++;
@@ -1226,7 +1234,7 @@ class PrintingFfi {
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsReleaseJob(String printerName, int jobId, {String? username, String? password}) async {
     if (!_isCups) {
-      throw PrintingFfiException('cupsReleaseJob is only supported on macOS and Linux');
+      throw PrintingFfiException('cupsReleaseJob is only supported on macOS, Linux, and Android');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsJobControlRequestId++;
@@ -1253,7 +1261,7 @@ class PrintingFfi {
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsMoveJob(String sourcePrinter, int jobId, String destPrinter, {String? username, String? password}) async {
     if (!_isCups) {
-      throw PrintingFfiException('cupsMoveJob is only supported on macOS and Linux');
+      throw PrintingFfiException('cupsMoveJob is only supported on macOS, Linux, and Android');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsJobControlRequestId++;
@@ -1280,7 +1288,7 @@ class PrintingFfi {
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsSetJobPriority(String printerName, int jobId, int priority, {String? username, String? password}) async {
     if (!_isCups) {
-      throw PrintingFfiException('cupsSetJobPriority is only supported on macOS and Linux');
+      throw PrintingFfiException('cupsSetJobPriority is only supported on macOS, Linux, and Android');
     }
     if (priority < 1 || priority > 100) {
       throw PrintingFfiException('Priority must be between 1 and 100');
@@ -1319,7 +1327,7 @@ class PrintingFfi {
   /// Throws [PrintingFfiException] on error.
   Future<PrinterAttribute?> cupsGetPrinterAttribute(String printerName, String attributeName, {String? username, String? password}) async {
     if (!_isCups) {
-      throw PrintingFfiException('cupsGetPrinterAttribute is only supported on macOS and Linux');
+      throw PrintingFfiException('cupsGetPrinterAttribute is only supported on macOS, Linux, and Android');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsAttributeRequestId++;
@@ -1345,7 +1353,7 @@ class PrintingFfi {
   /// Throws [PrintingFfiException] on error.
   Future<List<PrinterAttribute>> cupsGetPrinterAttributes(String printerName, List<String> attributeNames, {String? username, String? password}) async {
     if (!_isCups) {
-      throw PrintingFfiException('cupsGetPrinterAttributes is only supported on macOS and Linux');
+      throw PrintingFfiException('cupsGetPrinterAttributes is only supported on macOS, Linux, and Android');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsAttributeRequestId++;
