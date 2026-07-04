@@ -65,11 +65,16 @@ if [ -d "$SRC_DIR/src/xml" ]; then
   # Mirror the on-device layout: share/gutenprint/<rel>/xml/...
   mkdir -p "$OUT_DIR/share/gutenprint/$REL/xml"
   # Copy the actual xml data trees (printers, papers, dither, escp2), excluding
-  # build scaffolding (*.am, *.in, *.c, Makefile*, generated tmp headers).
+  # build scaffolding (*.am, *.in, *.c, Makefile*, generated tmp headers) AND any
+  # autotools/staging pollution (.deps, .libs, and a stray `tool`/`out` tree a
+  # prior mis-run could leave under src/xml — prune it so the copy can't recurse
+  # into a previously-staged OUT_DIR and blow up into thousands of files).
   ( cd "$SRC_DIR/src/xml"
-    find . -type d \
+    find . \( -name .deps -o -name .libs -o -name tool -o -name out \) -prune -o \
+      -type d -print \
       -exec sh -c 'mkdir -p "$0/$1"' "$OUT_DIR/share/gutenprint/$REL/xml" {} \;
-    find . -type f \( -name '*.xml' -o -name 'xml-stamp' \) \
+    find . \( -name .deps -o -name .libs -o -name tool -o -name out \) -prune -o \
+      -type f \( -name '*.xml' -o -name 'xml-stamp' \) -print \
       -exec sh -c 'cp -f "$1" "$0/$2"' "$OUT_DIR/share/gutenprint/$REL/xml" {} {} \;
   )
   echo "    staged: src/xml/*.xml -> share/gutenprint/$REL/xml/"

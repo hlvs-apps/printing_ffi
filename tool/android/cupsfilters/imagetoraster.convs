@@ -1,0 +1,40 @@
+#
+# imagetoraster.convs — image -> CUPS raster MIME conversion rules
+#
+# Bundled from cups-filters 1.28.17 (mime/cupsfilters.convs), TRIMMED to only the
+# rules whose target filter we actually ship on Android: `imagetoraster`
+# (jniLibs/arm64-v8a/libcupsf_imagetoraster.so, symlinked as
+# ServerBin/filter/imagetoraster by start_cups_server). CUPS 2.x moved the input
+# filters out of core into cups-filters, so without these rules cupsd rejects
+# "unsupported document format image/jpeg".
+#
+# These map raster-input image types straight to application/vnd.cups-raster,
+# which the DNP PPD's `*cupsFilter: "application/vnd.cups-raster 100
+# rastertogutenprint.5.3"` then hands to the Gutenprint dye-sub chain.
+#
+# The imagetopdf / rastertopdf / pdftoraster / gstoraster rules from the full
+# cupsfilters.convs are DELIBERATELY OMITTED: those filters (and their PDF
+# renderers — poppler/ghostscript) are NOT bundled (licensing constraint), so
+# referencing them would only make cupsd log "Filter ... not found".
+#
+# The source image MIME types (image/jpeg, image/png, image/gif, image/tiff,
+# image/x-bitmap, image/x-portable-*, ...) are already defined in the CUPS core
+# mime.types shipped alongside this file.
+#
+# Format: source/type  destination/type  cost  filter
+#
+
+image/gif			application/vnd.cups-raster	100	imagetoraster
+image/png			application/vnd.cups-raster	100	imagetoraster
+image/jpeg			application/vnd.cups-raster	100	imagetoraster
+image/tiff			application/vnd.cups-raster	100	imagetoraster
+image/x-bitmap			application/vnd.cups-raster	100	imagetoraster
+image/x-photocd			application/vnd.cups-raster	100	imagetoraster
+image/x-portable-anymap		application/vnd.cups-raster	100	imagetoraster
+image/x-portable-bitmap		application/vnd.cups-raster	100	imagetoraster
+image/x-portable-graymap	application/vnd.cups-raster	100	imagetoraster
+image/x-portable-pixmap		application/vnd.cups-raster	100	imagetoraster
+image/x-sgi-rgb			application/vnd.cups-raster	100	imagetoraster
+image/x-xbitmap			application/vnd.cups-raster	100	imagetoraster
+image/x-xpixmap			application/vnd.cups-raster	100	imagetoraster
+image/x-sun-raster		application/vnd.cups-raster	100	imagetoraster
