@@ -1,0 +1,47 @@
+Cross-compile fix: do not RUN the (arm64) extract-strings host tool.
+
+src/xml/extract-strings is compiled with the cross compiler (aarch64) but the
+Makefile then EXECUTES it on the build host to regenerate src/xml/xmli18n-tmp.h
+(an i18n/NLS translation-string header). On a cross build the freshly-built
+aarch64 binary cannot run on the x86_64 macOS host:
+    ./extract-strings: cannot execute binary file
+
+The tarball already SHIPS a pre-generated src/xml/xmli18n-tmp.h (6908 lines),
+and that header is consumed only by po/*.po (NLS) at *dist* time -- nothing in a
+--disable-nls build #includes it. So the regeneration step is unnecessary here.
+
+This patch (against src/xml/Makefile.in so it survives ./configure):
+  1. Drops xmli18n-tmp.h from CLEANFILES so the shipped copy is NOT deleted.
+  2. Replaces the regeneration recipe with a cross-safe no-op: keep the shipped
+     header; if missing, create an empty placeholder (harmless for --disable-nls).
+     extract-strings is no longer a prerequisite, so it is never RUN (it is still
+     compiled as a noinst_PROGRAM -- a harmless aarch64 link, never executed).
+
+build-gutenprint.sh additionally restores the pristine xmli18n-tmp.h from the
+tarball before (re)building, in case a previous failed run already removed it.
+
+--- a/src/xml/Makefile.in
++++ b/src/xml/Makefile.in
+@@ -478,7 +478,7 @@
+ extract_strings_SOURCES = extract-strings.c
+ extract_strings_LDADD = $(GUTENPRINT_LIBS)
+ # xmli18n-tmp.h is needed by po/POTFILES.in at dist time
+-CLEANFILES = xmli18n-tmp.h xmli18n-tmp.h.tmp xml-stamp xml-stamp.tmp
++CLEANFILES = xmli18n-tmp.h.tmp xml-stamp xml-stamp.tmp
+ EXTRA_DIST = $(pkgxmldata_DATA) xmli18n-tmp.h
+ MAINTAINERCLEANFILES = Makefile.in
+ all: all-recursive
+@@ -880,10 +880,10 @@
+
+ all-local: xmli18n-tmp.h xml-stamp
+
+-xmli18n-tmp.h: xml-stamp extract-strings
+-	-rm -f $@ $@.tmp
+-	./extract-strings `cat xml-stamp | sed -e 's;^;$(srcdir)/;'` > $@.tmp
+-	mv $@.tmp $@
++xmli18n-tmp.h: xml-stamp
++	@if test ! -f $(srcdir)/xmli18n-tmp.h && test ! -f xmli18n-tmp.h; then \
++	  echo "/* cross build: NLS string table intentionally empty */" > xmli18n-tmp.h; \
++	fi
+
+ dist-hook: xmli18n-tmp.h xml-stamp

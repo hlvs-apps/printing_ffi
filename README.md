@@ -21,7 +21,7 @@ A Flutter plugin for direct printer communication using native FFI (Foreign Func
 - **Duplex Printing** 📖: Support for double-sided printing with three modes: single-sided, duplex long edge (book-style), and duplex short edge (notepad-style).
 - **Get Printer Capabilities (Windows)** 🖨️: Fetch supported paper sizes, paper sources (trays/bins), and resolutions for a given printer on Windows.
 - **Advanced Print Settings (Windows)** 🔧: Control paper size, source, orientation, duplex mode, and collate mode for individual print jobs.
-- **Cross-Platform** 🌐: Supports macOS, Windows, and Linux via native APIs.
+- **Cross-Platform** 🌐: Supports macOS, Windows, Linux, and Android via native APIs. On Android the plugin bundles a CUPS server (compiled from source at build time) plus DNP/Citizen dye-sub USB auto-detect — see the [Android migration guide](docs/android-migration-guide.md).
 - **Offline Printer Support** 🔌: Lists offline printers on macOS using `cupsGetDests`, addressing a key limitation of other plugins.
 - **Native Performance** ⚡: Uses FFI to interface directly with native printing APIs, reducing overhead and improving speed.
 - **UI Feedback** 🔔: Includes an example app with a user-friendly interface, empty states, and snackbar notifications for errors and status updates.
@@ -33,7 +33,7 @@ A Flutter plugin for direct printer communication using native FFI (Foreign Func
 | 🍎 macOS   |   ✅ Supported   | Requires CUPS installation.          |
 | 🪟 Windows |   ✅ Supported   | Uses native `winspool` API.          |
 | 🐧 Linux   |   ✅ Supported   | Requires CUPS development libraries. |
-| 🤖 Android | ❌ Not Supported | -                                    |
+| 🤖 Android | ✅ Supported | Bundles a CUPS server (built from source) for IPP printing + DNP/Citizen dye-sub USB auto-detect. See [docs/android-migration-guide.md](docs/android-migration-guide.md). |
 | 📱 iOS     | ❌ Not Supported | -                                    |
 
 ## `printing_ffi` vs. `package:printing`

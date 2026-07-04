@@ -1,0 +1,85 @@
+#!/bin/sh
+# ---------------------------------------------------------------------------
+# cups-config-android  (template — @STAGED_CUPS@ substituted by build-gutenprint.sh)
+#
+# A drop-in `cups-config` for the CROSS build of Gutenprint. Gutenprint's
+# m4local/stp_cups.m4 (STP_CUPS_LIBS / STP_CUPS_PATH) runs `cups-config` to
+# learn the CUPS CFLAGS/LIBS/paths. The real cups-config that ships in the CUPS
+# build tree points at the on-device install prefix (/system/cups), not at our
+# arm64 STAGED tree, and its --libs emits a *shared* -lcups. Our staged CUPS is
+# STATIC ONLY (libcups.a / libcupsimage.a). So we hand cross-configure this shim,
+# which:
+#   * points --cflags at the staged headers (out/arm64/include),
+#   * emits the staged STATIC archives by absolute path for --libs / --image
+#     --libs (so the cross link resolves cupsRasterOpen etc. from libcupsimage.a
+#     and the rest from libcups.a — both contain the raster API),
+#   * reports the on-device runtime paths for --datadir/--serverbin/--serverroot
+#     (informational; Gutenprint only uses these to lay out PPDs/exec dirs).
+#
+# NOTE: paths below are the STAGED build-host paths for the include/lib (so the
+# cross compiler/linker can find them on THIS machine). The serverbin/datadir
+# values are the on-DEVICE runtime layout (where CUPS would look at runtime).
+# ---------------------------------------------------------------------------
+
+STAGED="@STAGED_CUPS@"
+
+VERSION="2.4.19"
+APIVERSION="2.4"
+BUILD="cups-2.4.19"
+
+# On-device runtime layout (matches build-cups.sh --prefix=/system/cups).
+cups_datadir=/system/cups/share/cups
+cups_serverbin=/system/cups/lib/cups
+cups_serverroot=/system/cups/etc/cups
+
+# Build-host paths to the staged cross artifacts.
+includedir="$STAGED/include"
+libdir="$STAGED/lib"
+
+# CUPS 2.4.x libcups.a transitive deps (mirrors the real cups-config LIBS:
+# "-lz -pthread -lm"). bionic folds -pthread into libc, but keep it harmless.
+CUPS_DEP_LIBS="-lz -lm"
+
+CFLAGS="-I$includedir"
+LDFLAGS="-L$libdir"
+
+usage() {
+    echo "Usage: cups-config [--image] [--static] --libs | --cflags | --ldflags | ..."
+    exit "$1"
+}
+
+[ $# -eq 0 ] && usage 1
+
+want_image=no
+
+# First pass: detect --image so --libs can include libcupsimage.a.
+for a in "$@"; do
+    [ "$a" = "--image" ] && want_image=yes
+done
+
+while test $# -gt 0; do
+    case $1 in
+        --api-version) echo "$APIVERSION" ;;
+        --build)       echo "$BUILD" ;;
+        --cflags)      echo "$CFLAGS" ;;
+        --datadir)     echo "$cups_datadir" ;;
+        --ldflags)     echo "$LDFLAGS" ;;
+        --image)       : ;;   # handled in --libs
+        --libs)
+            # Always emit the STATIC archives by absolute path. Order matters for
+            # a static link: libcupsimage.a (raster) before libcups.a, then deps.
+            if test "$want_image" = yes; then
+                echo "$libdir/libcupsimage.a $libdir/libcups.a $CUPS_DEP_LIBS"
+            else
+                echo "$libdir/libcups.a $CUPS_DEP_LIBS"
+            fi
+            ;;
+        --static)      : ;;   # we're always static; no-op
+        --serverbin)   echo "$cups_serverbin" ;;
+        --serverroot)  echo "$cups_serverroot" ;;
+        --version)     echo "$VERSION" ;;
+        --help)        usage 0 ;;
+        *)             usage 1 ;;
+    esac
+    shift
+done

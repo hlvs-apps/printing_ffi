@@ -12,6 +12,9 @@ buildscript {
     dependencies {
         // The Android Gradle Plugin knows how to build native code with the NDK.
         classpath("com.android.tools.build:gradle:8.9.1")
+        // Kotlin: this is now a hybrid FFI + method-channel plugin; PrintingFfiPlugin.kt
+        // (FlutterPlugin + ActivityAware) needs the Kotlin Gradle plugin to compile.
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.0")
     }
 }
 
@@ -23,6 +26,32 @@ rootProject.allprojects {
 }
 
 apply plugin: "com.android.library"
+apply plugin: "kotlin-android"
+
+// ---------------------------------------------------------------------------
+// Native build strategy (source-build, chosen decision D1):
+//
+// CUPS + cups-filters + Gutenprint + libusb have no Android system package, so
+// we cross-compile the whole stack from pinned sources with the NDK, during the
+// consumer's Gradle build. android/CMakeLists.txt runs build_cups_android.sh at
+// CMake configure time; it builds once per ABI, caches under ~/.gradle, stages
+// libcups.a + headers for CMake to link, and drops the runtime lib*.so + share/
+// assets into the build-dir folders below. CMake then compiles printing_ffi.c
+// and links the staged libcups. See android/CMakeLists.txt + build_cups_android.sh.
+// ---------------------------------------------------------------------------
+// Override with -PcupsAbis=arm64-v8a. Default (and only supported) arm64-v8a:
+// the CUPS cross-build is arm64-only today, and it is what every real Android
+// phone uses. x86_64 (emulator) / armeabi-v7a would each multiply the from-source
+// native build time and are not built yet.
+def cupsAbis    = (project.findProperty("cupsAbis") ?: "arm64-v8a").split(",").collect { it.trim() }
+def cupsRoot    = "${buildDir}/cups"
+def cupsStage   = "${cupsRoot}/stage"      // per-ABI include/ + lib/ for CMake link
+def cupsJniLibs = "${cupsRoot}/jniLibs"    // per-ABI runtime lib*.so packaged into the APK
+def cupsAssets  = "${cupsRoot}/assets"     // share/cups + share/gutenprint packaged into the APK
+// Persist the compiled stack across `flutter clean` (the from-source build is
+// expensive: minutes on a cold build). Lives under ~/.gradle, out of the (read-
+// only, git-dependency) plugin checkout.
+def cupsCache   = "${project.gradle.gradleUserHomeDir}/printing-ffi-cups-cache"
 
 android {
     namespace = "com.example.printing_ffi"
@@ -31,24 +60,17 @@ android {
     // to bump the version in their app.
     compileSdk = 36
 
-    // Use the NDK version
-    // declared in /android/app/build.gradle file of the Flutter project.
-    // Replace it with a version number if this plugin requires a specific NDK version.
-    // (e.g. ndkVersion "23.1.7779620")
-    ndkVersion = android.ndkVersion
+    // NDK r27 links 16 KB-aligned by default and ships the toolchain the cross
+    // scripts expect. Pin it so consumer builds are reproducible.
+    ndkVersion = "27.0.12077973"
 
-    // Invoke the shared CMake build with the Android Gradle Plugin.
+    // The source-build needs CMake 3.22 (execute_process + modern generator).
+    // This is a hard floor for consumers (C7); the old 3.10 comment no longer
+    // applies now that the plugin cross-compiles CUPS.
     externalNativeBuild {
         cmake {
-            path = "../src/CMakeLists.txt"
-
-            // The default CMake version for the Android Gradle Plugin is 3.10.2.
-            // https://developer.android.com/studio/projects/install-ndk#vanilla_cmake
-            //
-            // The Flutter tooling requires that developers have CMake 3.10 or later
-            // installed. You should not increase this version, as doing so will cause
-            // the plugin to fail to compile for some customers of the plugin.
-            // version "3.10.2"
+            path = "CMakeLists.txt"
+            version = "3.22.1"
         }
     }
 
@@ -57,7 +79,69 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
     }
 
+    // Match compileOptions (VERSION_11) so the Kotlin plugin glue compiles against the
+    // same JVM target as the Java sources.
+    kotlinOptions {
+        jvmTarget = "11"
+    }
+
     defaultConfig {
         minSdk = 24
+
+        // The CUPS cross-build is arm64-only today; src/CMakeLists desktop
+        // branches are unused on Android. Restrict the native build to the ABIs
+        // we actually cross-compile so CMake configure is never invoked for an
+        // unbuilt ABI (build_cups_android.sh also hard-fails for non-arm64).
+        ndk {
+            abiFilters(*cupsAbis.toArray(new String[0]))
+        }
+
+        // CMake runs build_cups_android.sh before add_library/link (see
+        // CMakeLists.txt). Pass the staging + cache dirs so it knows where to
+        // put libcups.a (for the link), the runtime lib*.so, and the assets.
+        externalNativeBuild {
+            cmake {
+                arguments "-DCUPS_STAGE=${cupsStage}",
+                          "-DCUPS_JNILIBS=${cupsJniLibs}",
+                          "-DCUPS_ASSETS=${cupsAssets}",
+                          "-DCUPS_CACHE=${cupsCache}"
+            }
+        }
+    }
+
+    // Package the cross-compiled runtime lib*.so (cupsd, backends, filters, cgi,
+    // gutenprint backend/filters, libc++_shared) AND the DATA assets (share/cups
+    // web templates + mime + gutenprint xml). gphoto only ships jniLibs; CUPS
+    // also ships assets (extracted on-device by the plugin at boot).
+    sourceSets {
+        main.jniLibs.srcDirs += cupsJniLibs
+        main.assets.srcDirs  += cupsAssets
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C4 — assets ordering (the "untested delta" the plan flagged as the top risk).
+//
+// build_cups_android.sh runs from CMake configure (configureCMake<Variant>) and
+// GENERATES the DATA assets into ${cupsAssets}. The jniLibs merge tasks re-scan
+// their source dirs at EXECUTION time and pick up the generated .so fine (proven
+// by gphoto). But merge<Variant>Assets reads its source-set dirs and, on a COLD
+// build where ${cupsAssets} does not yet exist when the task runs, silently ships
+// NOTHING under assets/cups + assets/gutenprint (the web UI + PPDs would 404 at
+// runtime). Verified: a cold `flutter build apk` packaged 0 asset files without
+// this wiring.
+//
+// Fix: make the asset (and jniLib, for symmetry/safety) merge tasks depend on the
+// CMake configure task for the same variant+ABI, so the orchestrator has created
+// ${cupsAssets} before the merge scans it. configureCMake* is where our
+// execute_process(build_cups_android.sh) runs, so this is the earliest AGP task
+// that guarantees the generated tree exists on disk.
+// ---------------------------------------------------------------------------
+afterEvaluate {
+    tasks.matching { it.name ==~ /merge.*Assets/ || it.name ==~ /merge.*JniLibFolders/ }.configureEach { mergeTask ->
+        def variant = (mergeTask.name =~ /^merge(.*?)(Assets|JniLibFolders)$/)[0][1]
+        tasks.matching { it.name ==~ /configureCMake${variant}(\[.*])?/ }.each { cmakeTask ->
+            mergeTask.dependsOn(cmakeTask)
+        }
     }
 }

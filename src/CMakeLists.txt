@@ -17,9 +17,15 @@ set_target_properties(printing_ffi PROPERTIES
 target_compile_definitions(printing_ffi PUBLIC DART_SHARED_LIB)
 
 if (ANDROID)
-  # Support Android 15 16k page size
+  # Support Android 15 16k page size.
   target_link_options(printing_ffi PRIVATE "-Wl,-z,max-page-size=16384")
-elseif(WIN32)
+endif()
+
+# NOTE: the Android build does NOT use this file. android/build.gradle points
+# externalNativeBuild at android/CMakeLists.txt, which cross-compiles CUPS from
+# source (build_cups_android.sh) and links the staged libcups.a. This file drives
+# only the desktop (macOS/Linux) + Windows builds.
+if(WIN32)
   # On Windows, link against Pdfium and the Graphics Device Interface library.
   # Use an absolute path to ensure the compiler can always find the headers.
   if(NOT IS_ABSOLUTE "${PDFIUM_INCLUDE_DIR}")

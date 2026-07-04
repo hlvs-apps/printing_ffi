@@ -49,3 +49,58 @@ example/macos/Flutter/GeneratedPluginRegistrant.swift
 # iOS/macOS specific generated files
 **/Podfile.lock
 **/GeneratedPluginRegistrant.swift
+
+# Android CUPS cross-compile spike (tool/android)
+tool/android/build/
+tool/android/cache/
+
+# Android Gutenprint cross-compile spike (tool/android/gutenprint)
+# Keep the staged out/arm64-gutenprint + scripts + patches + NOTES; ignore the
+# extracted source tree, downloaded tarball, build logs, and the generated
+# cups-config shim (materialized from cups-config-android.in at build time).
+tool/android/gutenprint/build/
+tool/android/gutenprint/cache/
+tool/android/gutenprint/logs/
+tool/android/gutenprint/cups-config-android
+
+# Android libusb cross-compile (tool/android/libusb)
+# Keep the staged out/arm64-libusb + build-libusb.sh; ignore the extracted
+# source tree, downloaded tarball, and build logs.
+tool/android/libusb/build/
+tool/android/libusb/cache/
+tool/android/libusb/logs/
+
+# Android permissive image libs (tool/android/imagelibs) — libjpeg-turbo/libpng/
+# libtiff. Keep the staged out/arm64-imagelibs + build-imagelibs.sh; ignore the
+# extracted sources, downloaded tarballs, and build logs.
+tool/android/imagelibs/build/
+tool/android/imagelibs/cache/
+tool/android/imagelibs/logs/
+
+# Android cups-filters cross-compile (tool/android/cupsfilters) — imagetoraster.
+# Keep the staged out/arm64-cupsfilters + build-cupsfilters.sh + patches; ignore
+# the extracted source tree, downloaded tarball, build logs, and the generated
+# cups-config shim (materialized from the gutenprint template at build time).
+tool/android/cupsfilters/build/
+tool/android/cupsfilters/cache/
+tool/android/cupsfilters/logs/
+tool/android/cupsfilters/cups-config-android
+
+# ---------------------------------------------------------------------------
+# Generated Android native artifacts (see docs/android-plugin-reusability-plan.md).
+# These are CROSS-COMPILED FROM SOURCE during the Android Gradle build, cached
+# under ~/.gradle. They are build outputs, never source — never commit them.
+# (The prebuilt copies currently on disk are a pre-Stage-2 spike and stay local.)
+# ---------------------------------------------------------------------------
+tool/android/out/
+example/android/app/src/main/jniLibs/
+example/android/app/src/main/assets/cups/
+example/android/app/src/main/assets/gutenprint/
+
+# Dead spike: not wired into any build (Kotlin/CMake). Slated for deletion.
+example/android/app/src/main/cpp/
+
+# Native / Gradle / Kotlin build trees (Flutter plugin + example)
+**/.cxx/
+**/.gradle/
+**/.kotlin/

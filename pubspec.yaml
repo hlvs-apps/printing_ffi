@@ -1,6 +1,6 @@
 name: printing_ffi
-description: "A Flutter plugin for direct printer communication using native FFI bindings for macOS, Windows, and Linux."
-version: 0.0.11
+description: "A Flutter plugin for direct printer communication using native FFI bindings for macOS, Windows, Linux, and Android."
+version: 0.1.0
 homepage: https://www.shreeman.dev
 repository: https://github.com/Shreemanarjun/printing_ffi
 issue_tracker: https://github.com/Shreemanarjun/printing_ffi/issues
@@ -22,6 +22,15 @@ dependencies:
   flutter:
     sdk: flutter
   plugin_platform_interface: ^2.0.2
+  # Android only: renders the bundled cupsd web interface in-app for
+  # openCupsSettings()/openCupsPrinterSettings(). webview_flutter's native side is
+  # Android/iOS; on desktop it is an inert, never-instantiated dependency (the web
+  # UI helpers no-op off Android).
+  webview_flutter: ^4.10.0
+  # Android only: persists seen DNP USB device signatures (vid:pid:serial) so a known,
+  # already-permitted printer is auto-opened on reattach without re-prompting. Inert
+  # off Android (the DNP auto-detect layer only runs there).
+  shared_preferences: ^2.3.2
 
 dev_dependencies:
   ffigen: ^20.0.0-dev.1
@@ -49,6 +58,17 @@ flutter:
   # Please refer to README.md for a detailed explanation.
   plugin:
     platforms:
+      android:
+        # Hybrid plugin: FFI for the CUPS/print ops (same C ABI as desktop) plus a
+        # Kotlin pluginClass (PrintingFfiPlugin) hosting the cups + USB MethodChannels
+        # and the usb_events EventChannel (bundled-cupsd asset extraction, DNP USB
+        # permission + fd handshake, and the foreground service). Auto-registered, so
+        # consumers add no Kotlin.
+        # NOTE: the package stays `com.example.printing_ffi` for now; renaming it to a
+        # real `dev.<...>` domain is a cosmetic follow-up (out of this stage's scope).
+        ffiPlugin: true
+        package: com.example.printing_ffi
+        pluginClass: PrintingFfiPlugin
       linux:
         ffiPlugin: true
       macos:

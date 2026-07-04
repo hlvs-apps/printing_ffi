@@ -44,6 +44,12 @@ dependencies:
   cupertino_icons: ^1.0.8
   file_picker: ^10.3.2
   shadcn_ui: ^0.31.3
+  # Android: shows the bundled cupsd web interface (printer properties) in an
+  # in-app WebView (http://127.0.0.1:<cupsd-port>/printers/<name>).
+  webview_flutter: ^4.10.0
+  # Android: persist seen DNP USB printers (vid/pid/serial) so a previously-granted
+  # device auto-adds on replug without re-prompting.
+  shared_preferences: ^2.3.2
 
 dev_dependencies:
   flutter_test:

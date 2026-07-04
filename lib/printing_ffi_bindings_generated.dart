@@ -267,6 +267,106 @@ class PrintingFfiBindings {
   late final _get_last_errorPtr = _lookup<ffi.NativeFunction<ffi.Pointer<ffi.Char> Function()>>('get_last_error');
   late final _get_last_error = _get_last_errorPtr.asFunction<ffi.Pointer<ffi.Char> Function()>();
 
+  /// Android only: boots the bundled cupsd inside the app sandbox and points the
+  /// libcups client at it. Returns the chosen localhost port (>0) or <0 on error.
+  int start_cups_server(
+    ffi.Pointer<ffi.Char> server_root,
+    ffi.Pointer<ffi.Char> native_lib_dir,
+    ffi.Pointer<ffi.Char> data_dir,
+    ffi.Pointer<ffi.Char> doc_root,
+  ) {
+    return _start_cups_server(
+      server_root,
+      native_lib_dir,
+      data_dir,
+      doc_root,
+    );
+  }
+
+  late final _start_cups_serverPtr = _lookup<ffi.NativeFunction<ffi.Int32 Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>>('start_cups_server');
+  late final _start_cups_server = _start_cups_serverPtr.asFunction<int Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>();
+
+  /// Android only: terminates the bundled cupsd started by [start_cups_server].
+  void stop_cups_server() {
+    return _stop_cups_server();
+  }
+
+  late final _stop_cups_serverPtr = _lookup<ffi.NativeFunction<ffi.Void Function()>>('stop_cups_server');
+  late final _stop_cups_server = _stop_cups_serverPtr.asFunction<void Function()>();
+
+  /// Android only: serves the app's USB fd to the forked DNP backend over an
+  /// AF_UNIX socket via SCM_RIGHTS. Returns 0 on success, -1 on error.
+  int start_usb_fd_server(
+    ffi.Pointer<ffi.Char> sock_path,
+    int usb_fd,
+  ) {
+    return _start_usb_fd_server(
+      sock_path,
+      usb_fd,
+    );
+  }
+
+  late final _start_usb_fd_serverPtr = _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Char>, ffi.Int)>>('start_usb_fd_server');
+  late final _start_usb_fd_server = _start_usb_fd_serverPtr.asFunction<int Function(ffi.Pointer<ffi.Char>, int)>();
+
+  /// Android only: stops the USB fd server started by [start_usb_fd_server].
+  void stop_usb_fd_server() {
+    return _stop_usb_fd_server();
+  }
+
+  late final _stop_usb_fd_serverPtr = _lookup<ffi.NativeFunction<ffi.Void Function()>>('stop_usb_fd_server');
+  late final _stop_usb_fd_server = _stop_usb_fd_serverPtr.asFunction<void Function()>();
+
+  /// Android only: the canonical AF_UNIX socket path (`<serverRoot>/usbfd.sock`)
+  /// the fd-server binds and the backend connects to. NULL until start_cups_server ran.
+  ffi.Pointer<ffi.Char> cups_usb_fd_sock_path() {
+    return _cups_usb_fd_sock_path();
+  }
+
+  late final _cups_usb_fd_sock_pathPtr = _lookup<ffi.NativeFunction<ffi.Pointer<ffi.Char> Function()>>('cups_usb_fd_sock_path');
+  late final _cups_usb_fd_sock_path = _cups_usb_fd_sock_pathPtr.asFunction<ffi.Pointer<ffi.Char> Function()>();
+
+  /// Android only: generate a Gutenprint PPD for a DNP dye-sub `driver` id and return
+  /// its absolute on-device path (pass straight to add_cups_printer). NULL on failure.
+  ffi.Pointer<ffi.Char> generate_cups_dnp_ppd(
+    ffi.Pointer<ffi.Char> driver,
+  ) {
+    return _generate_cups_dnp_ppd(
+      driver,
+    );
+  }
+
+  late final _generate_cups_dnp_ppdPtr = _lookup<ffi.NativeFunction<ffi.Pointer<ffi.Char> Function(ffi.Pointer<ffi.Char>)>>('generate_cups_dnp_ppd');
+  late final _generate_cups_dnp_ppd = _generate_cups_dnp_ppdPtr.asFunction<ffi.Pointer<ffi.Char> Function(ffi.Pointer<ffi.Char>)>();
+
+  /// Creates/modifies a CUPS queue via CUPS-Add-Modify-Printer (macOS/Linux/Android).
+  bool add_cups_printer(
+    ffi.Pointer<ffi.Char> name,
+    ffi.Pointer<ffi.Char> device_uri,
+    ffi.Pointer<ffi.Char> ppd_or_model,
+  ) {
+    return _add_cups_printer(
+      name,
+      device_uri,
+      ppd_or_model,
+    );
+  }
+
+  late final _add_cups_printerPtr = _lookup<ffi.NativeFunction<ffi.Bool Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>>('add_cups_printer');
+  late final _add_cups_printer = _add_cups_printerPtr.asFunction<bool Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>();
+
+  /// Deletes a CUPS queue via CUPS-Delete-Printer (macOS/Linux/Android). Idempotent.
+  bool remove_cups_printer(
+    ffi.Pointer<ffi.Char> name,
+  ) {
+    return _remove_cups_printer(
+      name,
+    );
+  }
+
+  late final _remove_cups_printerPtr = _lookup<ffi.NativeFunction<ffi.Bool Function(ffi.Pointer<ffi.Char>)>>('remove_cups_printer');
+  late final _remove_cups_printer = _remove_cups_printerPtr.asFunction<bool Function(ffi.Pointer<ffi.Char>)>();
+
   /// Functions that submit a job and return a job ID for status tracking.
   int submit_raw_data_job(
     ffi.Pointer<ffi.Char> printer_name,
@@ -325,6 +425,32 @@ class PrintingFfiBindings {
       >('submit_pdf_job');
   late final _submit_pdf_job = _submit_pdf_jobPtr
       .asFunction<int Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, int, int, ffi.Pointer<ffi.Char>, int, ffi.Pointer<ffi.Pointer<ffi.Char>>, ffi.Pointer<ffi.Pointer<ffi.Char>>, ffi.Pointer<ffi.Char>)>();
+
+  /// Submit an arbitrary file (image, PDF, ...) letting CUPS auto-detect the
+  /// document format from the file contents. Returns the job id (>0) on success,
+  /// 0 on failure. Not supported on Windows (macOS/Linux/Android via CUPS).
+  int submit_file_job(
+    ffi.Pointer<ffi.Char> printer_name,
+    ffi.Pointer<ffi.Char> file_path,
+    ffi.Pointer<ffi.Char> doc_name,
+    int num_options,
+    ffi.Pointer<ffi.Pointer<ffi.Char>> option_keys,
+    ffi.Pointer<ffi.Pointer<ffi.Char>> option_values,
+  ) {
+    return _submit_file_job(
+      printer_name,
+      file_path,
+      doc_name,
+      num_options,
+      option_keys,
+      option_values,
+    );
+  }
+
+  late final _submit_file_jobPtr = _lookup<ffi.NativeFunction<ffi.Int32 Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Int, ffi.Pointer<ffi.Pointer<ffi.Char>>, ffi.Pointer<ffi.Pointer<ffi.Char>>)>>(
+    'submit_file_job',
+  );
+  late final _submit_file_job = _submit_file_jobPtr.asFunction<int Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>, int, ffi.Pointer<ffi.Pointer<ffi.Char>>, ffi.Pointer<ffi.Pointer<ffi.Char>>)>();
 
   /// Function to initialize the PDFium library. Must be called once on startup on Windows.
   void init_pdfium_library() {

@@ -28,6 +28,13 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // The bundled CUPS native binaries (jniLibs) + the plugin's static-linked
+        // libcups were only cross-compiled for arm64-v8a. Restrict to that ABI so
+        // the build doesn't fail trying to link CUPS for an unbuilt ABI.
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
     buildTypes {
@@ -35,6 +42,15 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+
+    // Native binaries can only be execve'd if they exist as real files on disk in
+    // nativeLibraryDir. Modern AGP defaults useLegacyPackaging=false, which mmaps libs
+    // straight from the compressed APK (no on-disk file -> nothing to exec). Force it true.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
 }

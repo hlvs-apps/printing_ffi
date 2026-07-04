@@ -1,3 +1,16 @@
+## 0.1.0
+
+* ✨ **FEAT(android)**: Android is now a supported platform. The plugin bundles a private CUPS server (for network/office IPP printing) and DNP/Citizen dye-sub USB auto-detect, cross-compiled from source (CUPS + Gutenprint + libusb) during the app's Gradle build — no prebuilt binaries are shipped. 📱🖨️
+* ✨ **FEAT(android)**: One-call boot — `await PrintingFfi.instance.initializeAndroidCups()` starts the bundled cupsd and DNP USB auto-detect (no-op off Android). Observe progress via `cupsStatus` and detected printers via `dnpPrinters`.
+* ✨ **FEAT(android)**: In-app CUPS settings without building any widgets — `openCupsSettings(context)` (admin page) and `openCupsPrinterSettings(context, printerName: ...)` (per-printer page), backed by the bundled `CupsWebView`.
+* ✨ **FEAT**: Exposed `cupsServerPort` plus `cupsBaseUrl` / `cupsSettingsUrl` / `cupsPrinterSettingsUrl(name)` so apps can reach the in-app cupsd without tracking the port themselves.
+* 🐛 **FIX(android)**: DNP printer settings (default media size, quality, etc.) now persist across USB unplug/replug and app restarts — the CUPS queue is kept and reused instead of being deleted and recreated from a fresh PPD.
+* 🐛 **FIX(android)**: The CUPS web admin UI now renders in the device locale (a German phone shows German, English fallback) instead of always Russian, and its CSS/images load correctly (docroot files are made world-readable so cupsd will serve them).
+* ♻️ **REFACTOR(android)**: All Android glue — the from-source native build, the Kotlin `FlutterPlugin` (USB permission, fd handoff, foreground service, asset extraction), the USB device filter, and the Dart orchestration — now lives in the plugin. A consuming desktop app adds Android with build config, one manifest filter, and one Dart call.
+* 🧪 **TEST**: Added mock tests for the CUPS web-UI URL helpers (null-guard + printer-name percent-encoding).
+* 📝 **DOCS**: Added `docs/android-migration-guide.md` (a gphoto-style guide for adding the Android target) and `docs/android-plugin-reusability-plan.md` (the locked execution plan, reviewed via `/plan-eng-review` + codex).
+
+
 ## 0.0.12
 
 * ✨ **FEAT**: Added `printFileWithDialog` to open the native OS print dialog for any file type, providing a familiar user experience.

@@ -23,9 +23,32 @@
 
 #ifdef _WIN32
     #define strdup _strdup
-#else // macOS, Linux
+#else // macOS, Linux, Android (arm64-v8a with bundled static CUPS)
     #include <cups/cups.h>
     #include <cups/ppd.h>
+    // POSIX bits used by the portable CUPS admin helpers (add_cups_printer's
+    // PPD-file upload path needs access()/stat() to tell a PPD file from a bare
+    // model name). Kept out of the __ANDROID__-only block below so macOS/Linux
+    // builds get them too.
+    #include <unistd.h>
+    #include <sys/stat.h>
+#endif
+
+// Android-specific headers for the bundled cupsd launcher (start/stop server).
+#ifdef __ANDROID__
+    #include <sys/types.h>
+    #include <sys/stat.h>
+    #include <sys/socket.h>
+    #include <sys/wait.h>
+    #include <netinet/in.h>
+    #include <arpa/inet.h>
+    #include <fcntl.h>
+    #include <signal.h>
+    #include <errno.h>
+    #include <android/log.h>
+    #undef LOG
+    #define ANDROID_LOG_TAG "PrintingFfiCups"
+    #define LOG(...) __android_log_print(ANDROID_LOG_INFO, ANDROID_LOG_TAG, __VA_ARGS__)
 #endif
 
 // 5. PDFium headers (only for Windows implementation)
@@ -73,7 +96,9 @@ static INIT_ONCE g_pdfium_init_once = INIT_ONCE_STATIC_INIT;
 static bool g_pdfium_init_succeeded = false;
 #endif
 
+#ifndef LOG
 #define LOG(...)
+#endif
 
 // --- Last Error Handling ---
 
@@ -1435,6 +1460,1098 @@ FFI_PLUGIN_EXPORT const char *get_last_error()
     return g_last_error_message ? g_last_error_message : "";
 }
 
+// ============================================================================
+// Android: bundled cupsd scheduler (runs inside the app sandbox at the app uid)
+// ============================================================================
+#ifdef __ANDROID__
+
+#include <sys/un.h>
+
+// PID of the cupsd child we forked. 0 = not running.
+static pid_t g_cupsd_pid = 0;
+// The localhost port cupsd is listening on (chosen at start time).
+static int g_cupsd_port = 0;
+// The canonical USB-fd AF_UNIX socket path (<server_root>/usbfd.sock), filled by
+// start_cups_server. Empty until then. Both start_usb_fd_server (via the caller)
+// and the backend's PRINTING_FFI_USB_FD_SOCK env line derive from this.
+static char g_usb_fd_sock_path[PATH_MAX] = {0};
+
+// PPD-generation context, captured by start_cups_server so generate_cups_dnp_ppd()
+// can (re)generate a Gutenprint PPD for ANY detected DNP model at runtime (not just
+// the representative DS620 emitted at boot). Empty until start_cups_server succeeds.
+static char g_native_lib_dir[PATH_MAX] = {0}; // nativeLibraryDir (holds genppd)
+static char g_ppddir[PATH_MAX] = {0};         // <serverroot>/ppd (PPD output dir)
+static char g_stp_data_path[PATH_MAX] = {0};  // gutenprint xml dir (STP_DATA_PATH)
+// Static return buffer for generate_cups_dnp_ppd()'s absolute path.
+static char g_dnp_ppd_path[PATH_MAX] = {0};
+
+// mkdir -p equivalent. Returns 0 on success.
+static int mkdirs(const char *path, mode_t mode)
+{
+    char tmp[PATH_MAX];
+    size_t len = strlen(path);
+    if (len == 0 || len >= sizeof(tmp))
+        return -1;
+    strcpy(tmp, path);
+    if (tmp[len - 1] == '/')
+        tmp[len - 1] = '\0';
+    for (char *p = tmp + 1; *p; p++)
+    {
+        if (*p == '/')
+        {
+            *p = '\0';
+            if (mkdir(tmp, mode) != 0 && errno != EEXIST)
+                return -1;
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, mode) != 0 && errno != EEXIST)
+        return -1;
+    return 0;
+}
+
+// Write a whole string to a file (truncating). Returns 0 on success.
+static int write_file(const char *path, const char *content)
+{
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return -1;
+    size_t n = strlen(content);
+    size_t w = fwrite(content, 1, n, f);
+    fclose(f);
+    return (w == n) ? 0 : -1;
+}
+
+// Create one symlink target<-linkpath, replacing any existing entry. Logs but
+// does not fail the whole farm on a single error (best-effort).
+static void make_symlink(const char *target, const char *linkpath)
+{
+    unlink(linkpath); // ignore errors (may not exist)
+    if (symlink(target, linkpath) != 0)
+        LOG("symlink %s -> %s failed: %s", linkpath, target, strerror(errno));
+}
+
+// Try to bind a localhost TCP port to find a free one. Returns the port, or -1.
+static int find_free_port(void)
+{
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0)
+        return -1;
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0; // ask the kernel for an ephemeral port
+    if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+    {
+        close(s);
+        return -1;
+    }
+    socklen_t alen = sizeof(addr);
+    if (getsockname(s, (struct sockaddr *)&addr, &alen) != 0)
+    {
+        close(s);
+        return -1;
+    }
+    int port = ntohs(addr.sin_port);
+    close(s);
+    return port;
+}
+
+// Poll a localhost TCP port until something accepts a connection (cupsd is up),
+// or we time out. Returns true if connectable.
+static bool wait_for_port(int port, int timeout_ms)
+{
+    int waited = 0;
+    const int step = 100; // ms
+    while (waited < timeout_ms)
+    {
+        int s = socket(AF_INET, SOCK_STREAM, 0);
+        if (s >= 0)
+        {
+            struct sockaddr_in addr;
+            memset(&addr, 0, sizeof(addr));
+            addr.sin_family = AF_INET;
+            addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            addr.sin_port = htons((uint16_t)port);
+            int rc = connect(s, (struct sockaddr *)&addr, sizeof(addr));
+            close(s);
+            if (rc == 0)
+                return true;
+        }
+        // Also bail early if the child died.
+        if (g_cupsd_pid > 0)
+        {
+            int status = 0;
+            pid_t r = waitpid(g_cupsd_pid, &status, WNOHANG);
+            if (r == g_cupsd_pid)
+            {
+                LOG("cupsd child %d exited early (status=%d) while waiting for port", (int)g_cupsd_pid, status);
+                g_cupsd_pid = 0;
+                return false;
+            }
+        }
+        usleep(step * 1000);
+        waited += step;
+    }
+    return false;
+}
+
+// Build the ServerBin symlink farm: serverbin/{backend,filter,daemon}/<name>
+// -> native_lib_dir/lib*.so (per tool/android/jnilibs-map.md).
+static void build_symlink_farm(const char *serverbin, const char *native_lib_dir)
+{
+    char dir[PATH_MAX], link[PATH_MAX], target[PATH_MAX];
+
+    // backends
+    snprintf(dir, sizeof(dir), "%s/backend", serverbin);
+    mkdirs(dir, 0755);
+    static const char *backends[][2] = {
+        {"socket", "libcupsbe_socket.so"},
+        {"ipp", "libcupsbe_ipp.so"},
+        {"lpd", "libcupsbe_lpd.so"},
+        {"snmp", "libcupsbe_snmp.so"},
+        {"usb", "libcupsbe_usb.so"},
+        {"http", "libcupsbe_http.so"},
+        // Gutenprint dye-sub USB backend (DNP etc.). Canonical name has a '+',
+        // which is illegal in a lib*.so name, so the .so drops it. See
+        // tool/android/jnilibs-map.md. The device-uri scheme is gutenprint53+usb:.
+        {"gutenprint53+usb", "libcupsbe_gutenprint53usb.so"},
+        {NULL, NULL}};
+    for (int i = 0; backends[i][0]; i++)
+    {
+        snprintf(link, sizeof(link), "%s/backend/%s", serverbin, backends[i][0]);
+        snprintf(target, sizeof(target), "%s/%s", native_lib_dir, backends[i][1]);
+        make_symlink(target, link);
+    }
+
+    // daemons
+    snprintf(dir, sizeof(dir), "%s/daemon", serverbin);
+    mkdirs(dir, 0755);
+    static const char *daemons[][2] = {
+        {"cups-deviced", "libcupsd_deviced.so"},
+        {"cups-driverd", "libcupsd_driverd.so"},
+        {"cups-exec", "libcupsd_exec.so"},
+        {"cups-lpd", "libcupsd_lpd.so"},
+        {"cupsfilter", "libcupsd_cupsfilter.so"},
+        {NULL, NULL}};
+    for (int i = 0; daemons[i][0]; i++)
+    {
+        snprintf(link, sizeof(link), "%s/daemon/%s", serverbin, daemons[i][0]);
+        snprintf(target, sizeof(target), "%s/%s", native_lib_dir, daemons[i][1]);
+        make_symlink(target, link);
+    }
+
+    // filters
+    snprintf(dir, sizeof(dir), "%s/filter", serverbin);
+    mkdirs(dir, 0755);
+    static const char *filters[][2] = {
+        {"gziptoany", "libcupsf_gziptoany.so"},
+        {"pstops", "libcupsf_pstops.so"},
+        {"commandtops", "libcupsf_commandtops.so"},
+        {"rastertopwg", "libcupsf_rastertopwg.so"},
+        {"rastertoepson", "libcupsf_rastertoepson.so"},
+        {"rastertohp", "libcupsf_rastertohp.so"},
+        {"rastertolabel", "libcupsf_rastertolabel.so"},
+        // Image -> CUPS-raster input filter (from cups-filters 1.28.17). CUPS 2.x
+        // moved the input filters out of core into cups-filters, so without this
+        // cupsd rejects "unsupported document format image/jpeg". The mime CONV
+        // rules (share/cups/mime/imagetoraster.convs) route image/jpeg|png|gif|bmp
+        // -> application/vnd.cups-raster via this filter, which then feeds the
+        // Gutenprint DNP chain (rastertogutenprint.5.3 -> gutenprint53+usb).
+        // Permissive image libs (libjpeg-turbo/libpng) are STATICALLY embedded;
+        // the filter is exec'd as a separate process (license firewall).
+        {"imagetoraster", "libcupsf_imagetoraster.so"},
+        // Gutenprint dye-sub (DNP) raster filter + command filter. The generated
+        // DNP PPD references these EXACT names in its *cupsFilter lines:
+        //   "application/vnd.cups-raster 100 rastertogutenprint.5.3"  (version suffix!)
+        //   "application/vnd.cups-command 33 commandtodyesub"
+        // (see src/cups/genppd.c). cupsd resolves them under ServerBin/filter/.
+        {"rastertogutenprint.5.3", "libcupsf_rastertogutenprint.so"},
+        {"commandtodyesub", "libcupsf_commandtodyesub.so"},
+        {NULL, NULL}};
+    for (int i = 0; filters[i][0]; i++)
+    {
+        snprintf(link, sizeof(link), "%s/filter/%s", serverbin, filters[i][0]);
+        snprintf(target, sizeof(target), "%s/%s", native_lib_dir, filters[i][1]);
+        make_symlink(target, link);
+    }
+
+    // cgi-bin (web interface). cupsd exec's these as ServerBin/cgi-bin/<name>.cgi
+    // (scheduler/client.c). Each maps to nativeLibraryDir/libcupscgi_<name>.so.
+    snprintf(dir, sizeof(dir), "%s/cgi-bin", serverbin);
+    mkdirs(dir, 0755);
+    static const char *cgis[][2] = {
+        {"admin.cgi", "libcupscgi_admin.so"},
+        {"printers.cgi", "libcupscgi_printers.so"},
+        {"jobs.cgi", "libcupscgi_jobs.so"},
+        {"classes.cgi", "libcupscgi_classes.so"},
+        {"help.cgi", "libcupscgi_help.so"},
+        {NULL, NULL}};
+    for (int i = 0; cgis[i][0]; i++)
+    {
+        snprintf(link, sizeof(link), "%s/cgi-bin/%s", serverbin, cgis[i][0]);
+        snprintf(target, sizeof(target), "%s/%s", native_lib_dir, cgis[i][1]);
+        make_symlink(target, link);
+    }
+}
+
+// Generate a Gutenprint PPD for a single dye-sub driver by exec'ing the bundled
+// cups-genppd (staged as libcupstool_gutenprint_genppd.so). genppd is arm64-only
+// (can't run on the host at build time), so DNP PPDs are generated at runtime,
+// on first boot, into ppddir. Writes <ppddir>/stp-<driver>.5.3.ppd (uncompressed,
+// -Z). STP_DATA_PATH must point at the gutenprint xml dir so genppd finds the
+// driver data. Best-effort: logs + returns non-zero on failure, never aborts boot.
+// Returns 0 on success (or if the PPD already exists), -1 otherwise.
+static int generate_dnp_ppd(const char *native_lib_dir, const char *ppddir,
+                            const char *stp_data_path, const char *driver)
+{
+    char ppdfile[PATH_MAX];
+    snprintf(ppdfile, sizeof(ppdfile), "%s/stp-%s.5.3.ppd", ppddir, driver);
+    struct stat st;
+    if (stat(ppdfile, &st) == 0 && st.st_size > 0)
+    {
+        LOG("generate_dnp_ppd: %s already present (%lld bytes), skipping", ppdfile, (long long)st.st_size);
+        return 0;
+    }
+
+    char genppd_bin[PATH_MAX];
+    snprintf(genppd_bin, sizeof(genppd_bin), "%s/libcupstool_gutenprint_genppd.so", native_lib_dir);
+    if (stat(genppd_bin, &st) != 0)
+    {
+        LOG("generate_dnp_ppd: genppd binary not found at %s (DNP PPD unavailable)", genppd_bin);
+        return -1;
+    }
+    if (stat(stp_data_path, &st) != 0)
+    {
+        LOG("generate_dnp_ppd: gutenprint data not found at %s", stp_data_path);
+        return -1;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0)
+    {
+        LOG("generate_dnp_ppd: fork failed: %s", strerror(errno));
+        return -1;
+    }
+    if (pid == 0)
+    {
+        // Child: genppd reads STP_DATA_PATH to find the driver XML data.
+        setenv("STP_DATA_PATH", stp_data_path, 1);
+        // -p <ppddir>: output dir; -Z: no gzip; <driver>: single model to emit.
+        char *const argv[] = {
+            genppd_bin,
+            (char *)"-p", (char *)ppddir,
+            (char *)"-Z",
+            (char *)driver,
+            NULL};
+        execv(genppd_bin, argv);
+        _exit(127);
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid)
+    {
+        LOG("generate_dnp_ppd: waitpid failed: %s", strerror(errno));
+        return -1;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    {
+        LOG("generate_dnp_ppd: cups-genppd exited abnormally (status=%d) for driver %s", status, driver);
+        return -1;
+    }
+    if (stat(ppdfile, &st) != 0 || st.st_size == 0)
+    {
+        LOG("generate_dnp_ppd: cups-genppd reported success but %s missing/empty", ppdfile);
+        return -1;
+    }
+    LOG("generate_dnp_ppd: generated %s (%lld bytes)", ppdfile, (long long)st.st_size);
+    return 0;
+}
+
+FFI_PLUGIN_EXPORT int32_t start_cups_server(const char *server_root, const char *native_lib_dir, const char *data_dir, const char *doc_root)
+{
+    set_last_error("");
+
+    if (!server_root || !native_lib_dir || !data_dir)
+    {
+        set_last_error("start_cups_server: server_root/native_lib_dir/data_dir required");
+        return -1;
+    }
+
+    if (g_cupsd_pid > 0)
+    {
+        // Already running: verify it's still alive; if so, just re-point the client.
+        int status = 0;
+        if (waitpid(g_cupsd_pid, &status, WNOHANG) == 0)
+        {
+            LOG("cupsd already running (pid %d, port %d)", (int)g_cupsd_pid, g_cupsd_port);
+            cupsSetServer("127.0.0.1");
+            return g_cupsd_port;
+        }
+        g_cupsd_pid = 0;
+    }
+
+    uid_t uid = getuid();
+    gid_t gid = getgid();
+    LOG("start_cups_server: uid=%d gid=%d server_root=%s native_lib_dir=%s data_dir=%s doc_root=%s",
+        (int)uid, (int)gid, server_root, native_lib_dir, data_dir, doc_root ? doc_root : "(null)");
+
+    // --- Directory layout under server_root ---
+    char serverroot[PATH_MAX];   // ServerRoot (config: cupsd.conf, cups-files.conf, ppd)
+    char serverbin[PATH_MAX];    // ServerBin  (symlink farm)
+    char requestroot[PATH_MAX];  // RequestRoot (spool)
+    char statedir[PATH_MAX];     // StateDir
+    char cachedir[PATH_MAX];     // CacheDir
+    char tempdir[PATH_MAX];      // TempDir
+    char logdir[PATH_MAX];       // logs
+    char ppddir[PATH_MAX];
+
+    snprintf(serverroot, sizeof(serverroot), "%s/etc/cups", server_root);
+    snprintf(serverbin, sizeof(serverbin), "%s/sbin", server_root);
+    snprintf(requestroot, sizeof(requestroot), "%s/var/spool", server_root);
+    snprintf(statedir, sizeof(statedir), "%s/var/run", server_root);
+    snprintf(cachedir, sizeof(cachedir), "%s/var/cache", server_root);
+    snprintf(tempdir, sizeof(tempdir), "%s/var/spool/tmp", server_root);
+    snprintf(logdir, sizeof(logdir), "%s/var/log", server_root);
+    snprintf(ppddir, sizeof(ppddir), "%s/ppd", serverroot);
+
+    if (mkdirs(serverroot, 0755) != 0 || mkdirs(serverbin, 0755) != 0 ||
+        mkdirs(requestroot, 0710) != 0 || mkdirs(statedir, 0755) != 0 ||
+        mkdirs(cachedir, 0755) != 0 || mkdirs(tempdir, 01770) != 0 ||
+        mkdirs(logdir, 0755) != 0 || mkdirs(ppddir, 0755) != 0)
+    {
+        set_last_error("start_cups_server: failed to create runtime dirs under %s: %s", server_root, strerror(errno));
+        return -2;
+    }
+
+    // --- ServerBin symlink farm -> nativeLibraryDir/lib*.so ---
+    build_symlink_farm(serverbin, native_lib_dir);
+
+    // --- Pick a free localhost port ---
+    int port = find_free_port();
+    if (port <= 0)
+    {
+        set_last_error("start_cups_server: could not find a free localhost port");
+        return -3;
+    }
+
+    // --- DataDir: cupsd wants <DataDir>/mime + <DataDir>/data; we extracted
+    //     share/cups under data_dir. ---
+    char datadir[PATH_MAX];
+    snprintf(datadir, sizeof(datadir), "%s/share/cups", data_dir);
+    // Fallback: if the caller already pointed data_dir at share/cups itself.
+    {
+        struct stat st;
+        char mimecheck[PATH_MAX];
+        snprintf(mimecheck, sizeof(mimecheck), "%s/mime", datadir);
+        if (stat(mimecheck, &st) != 0)
+        {
+            snprintf(datadir, sizeof(datadir), "%s", data_dir);
+        }
+    }
+
+    // --- Gutenprint driver data path (STP_DATA_PATH) ---
+    // The DNP dye-sub filter (rastertogutenprint), backend (gutenprint53+usb) and
+    // the PPD generator (cups-genppd) all read the gutenprint XML driver data via
+    // the STP_DATA_PATH env var (libgutenprint stp_data_path(), path.c). It must
+    // point at the dir that DIRECTLY contains xml-stamp + printers/dyesub.xml etc.
+    // The Kotlin layer extracts it as a sibling of share/cups under the same
+    // data_dir root, so it lives at <data_dir>/share/gutenprint/5.3/xml.
+    //
+    // cupsd does NOT inherit its own process env for filters/backends — it builds
+    // a fixed common_env (scheduler/env.c). To propagate STP_DATA_PATH to the
+    // forked filter/backend/genppd we must emit a `SetEnv` directive in
+    // cups-files.conf (SetEnv/PassEnv live in cups-files.conf as of CUPS 2.x;
+    // see scheduler/conf.c read_cups_files_conf).
+    char stp_data_path[PATH_MAX];
+    char setenv_line[PATH_MAX + 32];
+    setenv_line[0] = '\0';
+    snprintf(stp_data_path, sizeof(stp_data_path), "%s/share/gutenprint/5.3/xml", data_dir);
+    {
+        struct stat st;
+        char stampcheck[PATH_MAX];
+        snprintf(stampcheck, sizeof(stampcheck), "%s/xml-stamp", stp_data_path);
+        if (stat(stampcheck, &st) == 0)
+        {
+            snprintf(setenv_line, sizeof(setenv_line), "SetEnv STP_DATA_PATH %s\n", stp_data_path);
+            // Capture the PPD-generation context so generate_cups_dnp_ppd() can
+            // (re)generate a PPD for ANY detected DNP model at runtime (per-model
+            // PPDs), not only the representative DS620 emitted here at boot.
+            snprintf(g_native_lib_dir, sizeof(g_native_lib_dir), "%s", native_lib_dir);
+            snprintf(g_ppddir, sizeof(g_ppddir), "%s", ppddir);
+            snprintf(g_stp_data_path, sizeof(g_stp_data_path), "%s", stp_data_path);
+            // Best-effort: generate the representative DNP DS620 PPD on first
+            // boot (genppd is arm64-only, so we can't pre-generate on the host).
+            // The PPD lands at <ppddir>/stp-dnp-ds620.5.3.ppd; a queue is created
+            // against it with device-uri gutenprint53+usb:... Non-fatal on failure.
+            generate_dnp_ppd(native_lib_dir, ppddir, stp_data_path, "dnp-ds620");
+        }
+        else
+            LOG("start_cups_server: gutenprint data not found at %s (DNP printing unavailable)", stp_data_path);
+    }
+
+    // --- USB fd delivery socket (PRINTING_FFI_USB_FD_SOCK) ---
+    // The patched DNP backend connects to this AF_UNIX (filesystem) socket at job
+    // dispatch to receive the app's USB fd via SCM_RIGHTS. We publish the canonical
+    // path <server_root>/usbfd.sock so C (start_usb_fd_server / cups_usb_fd_sock_path),
+    // the backend env, and the Kotlin caller all agree, and — like STP_DATA_PATH —
+    // propagate it to the forked backend via a SetEnv line in cups-files.conf
+    // (cupsd builds a fixed common_env; process env isn't inherited). We always emit
+    // the env line (the app decides at runtime whether to actually serve an fd; if it
+    // doesn't, the backend's connect() fails and it falls back to enumeration).
+    snprintf(g_usb_fd_sock_path, sizeof(g_usb_fd_sock_path), "%s/usbfd.sock", server_root);
+    char usbfd_setenv_line[PATH_MAX + 40];
+    snprintf(usbfd_setenv_line, sizeof(usbfd_setenv_line), "SetEnv PRINTING_FFI_USB_FD_SOCK %s\n", g_usb_fd_sock_path);
+
+    // --- cups-files.conf ---
+    // KNOWN HARD PART: at app uid there is usually no passwd name, so use numeric
+    // "User #<uid>" / "Group #<gid>". cupsd is non-root so it never setuids; the
+    // directive is only used for the (skipped) privilege drop + ownership checks.
+    // --- DocumentRoot for the web interface (only if the extracted docroot exists) ---
+    // cupsd serves static files (index.html, css, images) from DocumentRoot; the
+    // CGIs reference /cups.css, /images/... relative to it. Empty = web UI static
+    // assets unavailable (CGIs still run, just unstyled).
+    char docroot_line[PATH_MAX + 32];
+    docroot_line[0] = '\0';
+    if (doc_root && doc_root[0])
+    {
+        struct stat st;
+        if (stat(doc_root, &st) == 0 && S_ISDIR(st.st_mode))
+            snprintf(docroot_line, sizeof(docroot_line), "DocumentRoot %s\n", doc_root);
+        else
+            LOG("start_cups_server: doc_root '%s' not a dir; web UI will be unstyled", doc_root);
+    }
+
+    char files_conf_path[PATH_MAX];
+    snprintf(files_conf_path, sizeof(files_conf_path), "%s/cups-files.conf", serverroot);
+    {
+        char buf[4096];
+        snprintf(buf, sizeof(buf),
+                 "User #%d\n"
+                 "Group #%d\n"
+                 "SystemGroup #%d\n"
+                 "ServerRoot   %s\n"
+                 "ServerBin    %s\n"
+                 "DataDir      %s\n"
+                 "%s"
+                 "%s"
+                 "%s"
+                 "RequestRoot  %s\n"
+                 "StateDir     %s\n"
+                 "CacheDir     %s\n"
+                 "TempDir      %s\n"
+                 "AccessLog    %s/access_log\n"
+                 "ErrorLog     %s/error_log\n"
+                 "PageLog      %s/page_log\n"
+                 "FileDevice Yes\n",
+                 (int)uid, (int)gid, (int)gid,
+                 serverroot, serverbin, datadir, docroot_line, setenv_line, usbfd_setenv_line, requestroot, statedir, cachedir, tempdir,
+                 logdir, logdir, logdir);
+        if (write_file(files_conf_path, buf) != 0)
+        {
+            set_last_error("start_cups_server: failed to write %s: %s", files_conf_path, strerror(errno));
+            return -4;
+        }
+    }
+
+    // --- cupsd.conf ---
+    char cupsd_conf_path[PATH_MAX];
+    snprintf(cupsd_conf_path, sizeof(cupsd_conf_path), "%s/cupsd.conf", serverroot);
+    {
+        char buf[4096];
+        snprintf(buf, sizeof(buf),
+                 "LogLevel debug\n"
+                 "MaxLogSize 10m\n"
+                 "Listen 127.0.0.1:%d\n"
+                 "Browsing Off\n"
+                 "DefaultAuthType None\n"
+                 "WebInterface Yes\n"
+                 "ErrorPolicy retry-job\n"
+                 "<Location />\n"
+                 "  Order allow,deny\n"
+                 "  Allow from all\n"
+                 "</Location>\n"
+                 "<Location /admin>\n"
+                 "  Order allow,deny\n"
+                 "  Allow from all\n"
+                 "</Location>\n"
+                 "<Location /admin/conf>\n"
+                 "  Order allow,deny\n"
+                 "  Allow from all\n"
+                 "</Location>\n"
+                 "<Policy default>\n"
+                 "  JobPrivateAccess all\n"
+                 "  JobPrivateValues none\n"
+                 "  SubscriptionPrivateAccess all\n"
+                 "  SubscriptionPrivateValues none\n"
+                 "  <Limit All>\n"
+                 "    Order allow,deny\n"
+                 "    Allow from all\n"
+                 "  </Limit>\n"
+                 "</Policy>\n",
+                 port);
+        if (write_file(cupsd_conf_path, buf) != 0)
+        {
+            set_last_error("start_cups_server: failed to write %s: %s", cupsd_conf_path, strerror(errno));
+            return -5;
+        }
+    }
+
+    // --- cupsd executable (extracted lib in nativeLibraryDir) ---
+    char cupsd_bin[PATH_MAX];
+    snprintf(cupsd_bin, sizeof(cupsd_bin), "%s/libcupsd.so", native_lib_dir);
+    {
+        struct stat st;
+        if (stat(cupsd_bin, &st) != 0)
+        {
+            set_last_error("start_cups_server: cupsd binary not found at %s: %s", cupsd_bin, strerror(errno));
+            return -6;
+        }
+    }
+
+    // --- fork + execv cupsd in the foreground (-f) ---
+    pid_t pid = fork();
+    if (pid < 0)
+    {
+        set_last_error("start_cups_server: fork failed: %s", strerror(errno));
+        return -7;
+    }
+    if (pid == 0)
+    {
+        // Child: exec cupsd. -f = foreground (don't daemonize), -c/-s = configs.
+        char *const argv[] = {
+            cupsd_bin,
+            (char *)"-f",
+            (char *)"-c", cupsd_conf_path,
+            (char *)"-s", files_conf_path,
+            NULL};
+        execv(cupsd_bin, argv);
+        // If execv returns it failed.
+        _exit(127);
+    }
+
+    // Parent.
+    g_cupsd_pid = pid;
+    g_cupsd_port = port;
+    LOG("start_cups_server: forked cupsd pid=%d on 127.0.0.1:%d", (int)pid, port);
+
+    // Wait for cupsd to answer on the port.
+    if (!wait_for_port(port, 8000))
+    {
+        set_last_error("start_cups_server: cupsd did not answer on 127.0.0.1:%d within timeout (check error_log under %s)", port, logdir);
+        // Try to clean up if it's still around.
+        if (g_cupsd_pid > 0)
+        {
+            kill(g_cupsd_pid, SIGTERM);
+        }
+        return -8;
+    }
+
+    // Point the libcups client at our in-app cupsd.
+    cupsSetServer("127.0.0.1"); // sets server; port is taken from CUPS_SERVER/ippPort below
+    // cupsSetServer parses host[:port] — pass host:port so ippPort() resolves too.
+    {
+        char hostport[64];
+        snprintf(hostport, sizeof(hostport), "127.0.0.1:%d", port);
+        cupsSetServer(hostport);
+        // Belt-and-suspenders: also set CUPS_SERVER for any code path reading env.
+        setenv("CUPS_SERVER", hostport, 1);
+    }
+
+    LOG("start_cups_server: SUCCESS, cupsd up on 127.0.0.1:%d (client targeted)", port);
+    return port;
+}
+
+FFI_PLUGIN_EXPORT void stop_cups_server(void)
+{
+    if (g_cupsd_pid > 0)
+    {
+        LOG("stop_cups_server: terminating cupsd pid=%d", (int)g_cupsd_pid);
+        kill(g_cupsd_pid, SIGTERM);
+        int status = 0;
+        // Give it a moment to exit cleanly, then reap.
+        for (int i = 0; i < 20; i++)
+        {
+            if (waitpid(g_cupsd_pid, &status, WNOHANG) == g_cupsd_pid)
+            {
+                g_cupsd_pid = 0;
+                g_cupsd_port = 0;
+                return;
+            }
+            usleep(100 * 1000);
+        }
+        // Force kill if still alive.
+        kill(g_cupsd_pid, SIGKILL);
+        waitpid(g_cupsd_pid, &status, 0);
+        g_cupsd_pid = 0;
+        g_cupsd_port = 0;
+    }
+}
+
+// --- USB fd delivery server -------------------------------------------------
+//
+// Hands the app's live USB fd to the forked DNP backend over an AF_UNIX socket
+// via SCM_RIGHTS. See the header for the full contract.
+
+// Server state (single active server at a time — one printer).
+// NOTE: Android's bionic has NO pthread cancellation (pthread_cancel etc. are
+// absent), so clean shutdown is done by g_usbfd_stop + closing the listen fd,
+// which makes the blocked accept() return; the thread then observes the flag/EBADF
+// and exits, and stop_usb_fd_server joins it.
+static int g_usbfd_listen_fd = -1;    // listening AF_UNIX socket, -1 = none
+static int g_usbfd_source_fd = -1;    // long-lived USB fd owned by caller (NOT ours to close)
+static pthread_t g_usbfd_thread;      // accept loop thread
+static volatile bool g_usbfd_thread_running = false;
+static volatile bool g_usbfd_stop = false;      // set by stop to unwind the loop
+static char g_usbfd_bound_path[PATH_MAX] = {0}; // path we bound (for unlink on stop)
+
+// Send exactly one payload byte + a SCM_RIGHTS control message carrying a single
+// int fd over `conn_fd`. This is the exact cmsg layout the patched backend's
+// printing_ffi_recv_fd() expects (1 data byte + CMSG_LEN(sizeof(int))). Returns 0
+// on success, -1 on failure. SIGPIPE is suppressed per-call via MSG_NOSIGNAL.
+static int usbfd_send_one(int conn_fd, int fd_to_send)
+{
+    char dummy = 'F'; // >= 1 data byte; the backend reads (and ignores) it
+    struct iovec iov;
+    iov.iov_base = &dummy;
+    iov.iov_len = 1;
+
+    union
+    {
+        char buf[CMSG_SPACE(sizeof(int))];
+        struct cmsghdr align;
+    } cmsgu;
+    memset(&cmsgu, 0, sizeof(cmsgu));
+
+    struct msghdr msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsgu.buf;
+    msg.msg_controllen = sizeof(cmsgu.buf);
+
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cmsg), &fd_to_send, sizeof(int));
+    // Match msg_controllen to the actual cmsg length we filled.
+    msg.msg_controllen = cmsg->cmsg_len;
+
+    ssize_t n;
+    do
+    {
+        n = sendmsg(conn_fd, &msg, MSG_NOSIGNAL);
+    } while (n < 0 && errno == EINTR);
+
+    return (n >= 1) ? 0 : -1;
+}
+
+// Accept loop: for each backend connection, dup the live USB fd and send it via
+// SCM_RIGHTS, then close the accepted conn. dup() because libusb (in the backend)
+// closes the wrapped fd at job end — our source fd must survive across jobs.
+static void *usbfd_accept_thread(void *arg)
+{
+    // The listen fd is captured by value at start: stop_usb_fd_server closes it to
+    // unblock accept(), which then returns EBADF/EINVAL and we exit the loop.
+    int listen_fd = (int)(intptr_t)arg;
+
+    for (;;)
+    {
+        int conn = accept(listen_fd, NULL, NULL);
+        if (conn < 0)
+        {
+            if (errno == EINTR && !g_usbfd_stop)
+                continue;
+            // Listen fd closed by stop (EBADF/EINVAL) or fatal error -> exit.
+            break;
+        }
+        if (g_usbfd_stop)
+        {
+            close(conn);
+            break;
+        }
+
+        int dup_fd = dup(g_usbfd_source_fd);
+        if (dup_fd < 0)
+        {
+            LOG("usbfd: dup(usb_fd=%d) failed: %s", g_usbfd_source_fd, strerror(errno));
+            close(conn);
+            continue;
+        }
+
+        if (usbfd_send_one(conn, dup_fd) != 0)
+            LOG("usbfd: sendmsg(SCM_RIGHTS) failed: %s", strerror(errno));
+        else
+            LOG("usbfd: delivered dup(fd=%d) to backend", g_usbfd_source_fd);
+
+        // We own the dup; libusb in the backend owns its received copy. Close ours.
+        close(dup_fd);
+        close(conn);
+    }
+    return NULL;
+}
+
+FFI_PLUGIN_EXPORT int start_usb_fd_server(const char *sock_path, int usb_fd)
+{
+    set_last_error("");
+
+    if (!sock_path || !sock_path[0])
+    {
+        set_last_error("start_usb_fd_server: sock_path required");
+        return -1;
+    }
+    if (usb_fd < 0)
+    {
+        set_last_error("start_usb_fd_server: usb_fd (%d) invalid", usb_fd);
+        return -1;
+    }
+    if (strlen(sock_path) >= sizeof(((struct sockaddr_un *)0)->sun_path))
+    {
+        set_last_error("start_usb_fd_server: sock_path too long (%zu >= %zu)",
+                       strlen(sock_path), sizeof(((struct sockaddr_un *)0)->sun_path));
+        return -1;
+    }
+
+    // One active server at a time: replace any existing one.
+    if (g_usbfd_thread_running || g_usbfd_listen_fd >= 0)
+        stop_usb_fd_server();
+
+    // Process-wide: never die from a write to a peer that closed early.
+    signal(SIGPIPE, SIG_IGN);
+
+    int lfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (lfd < 0)
+    {
+        set_last_error("start_usb_fd_server: socket() failed: %s", strerror(errno));
+        return -1;
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, sock_path, sizeof(addr.sun_path) - 1);
+
+    unlink(sock_path); // stale socket from a prior run; ignore errors
+
+    if (bind(lfd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+    {
+        set_last_error("start_usb_fd_server: bind(%s) failed: %s", sock_path, strerror(errno));
+        close(lfd);
+        return -1;
+    }
+    if (listen(lfd, 4) != 0)
+    {
+        set_last_error("start_usb_fd_server: listen(%s) failed: %s", sock_path, strerror(errno));
+        close(lfd);
+        unlink(sock_path);
+        return -1;
+    }
+
+    g_usbfd_listen_fd = lfd;
+    g_usbfd_source_fd = usb_fd; // caller owns it; we only dup() from it
+    g_usbfd_stop = false;
+    snprintf(g_usbfd_bound_path, sizeof(g_usbfd_bound_path), "%s", sock_path);
+
+    int rc = pthread_create(&g_usbfd_thread, NULL, usbfd_accept_thread, (void *)(intptr_t)lfd);
+    if (rc != 0)
+    {
+        set_last_error("start_usb_fd_server: pthread_create failed: %s", strerror(rc));
+        close(lfd);
+        unlink(sock_path);
+        g_usbfd_listen_fd = -1;
+        g_usbfd_source_fd = -1;
+        g_usbfd_bound_path[0] = '\0';
+        return -1;
+    }
+    g_usbfd_thread_running = true;
+
+    LOG("start_usb_fd_server: serving usb_fd=%d on %s", usb_fd, sock_path);
+    return 0;
+}
+
+FFI_PLUGIN_EXPORT void stop_usb_fd_server(void)
+{
+    // Signal stop, then close the listen fd so the blocked accept() returns; the
+    // thread observes the flag / the closed fd and exits its loop, and we join it.
+    // (bionic has no pthread_cancel, so this is the only clean way to unwind.)
+    g_usbfd_stop = true;
+    int lfd = g_usbfd_listen_fd;
+    g_usbfd_listen_fd = -1;
+    if (lfd >= 0)
+        close(lfd);
+
+    if (g_usbfd_thread_running)
+    {
+        pthread_join(g_usbfd_thread, NULL);
+        g_usbfd_thread_running = false;
+    }
+    g_usbfd_stop = false;
+
+    if (g_usbfd_bound_path[0])
+    {
+        unlink(g_usbfd_bound_path);
+        g_usbfd_bound_path[0] = '\0';
+    }
+
+    // Do NOT close g_usbfd_source_fd — it is owned by the Kotlin/UsbDeviceConnection
+    // layer. We only ever closed the dups we created.
+    g_usbfd_source_fd = -1;
+}
+
+FFI_PLUGIN_EXPORT const char *cups_usb_fd_sock_path(void)
+{
+    return g_usb_fd_sock_path[0] ? g_usb_fd_sock_path : NULL;
+}
+
+// generate_cups_dnp_ppd: generate (if not already present) a Gutenprint PPD for a
+// specific DNP/Citizen dye-sub driver and return its ABSOLUTE on-device path, so the
+// caller can hand that path straight to add_cups_printer (which uploads the PPD file
+// directly, avoiding cups-driverd). `driver` is the Gutenprint driver id — which is
+// exactly the DnpUsbManager "make" string, e.g. "dnp-dsrx1", "dnp-ds620", "dnp-ds820"
+// (see src/xml/printers/dyesub.xml <printer driver="..."/>). Returns a pointer to a
+// static buffer with the PPD path on success, or NULL on failure (get_last_error).
+// Requires start_cups_server to have run (needs the captured PPD context).
+FFI_PLUGIN_EXPORT const char *generate_cups_dnp_ppd(const char *driver)
+{
+    set_last_error("");
+    if (!driver || !*driver)
+    {
+        set_last_error("generate_cups_dnp_ppd: driver id is required");
+        return NULL;
+    }
+    if (!g_ppddir[0] || !g_native_lib_dir[0] || !g_stp_data_path[0])
+    {
+        set_last_error("generate_cups_dnp_ppd: PPD context not ready (start_cups_server not run / gutenprint data missing)");
+        return NULL;
+    }
+    // Reject anything that isn't a plain driver token (no path separators / traversal)
+    // — genppd takes it as a model id, and it becomes part of the output filename.
+    if (strchr(driver, '/') != NULL || strstr(driver, "..") != NULL)
+    {
+        set_last_error("generate_cups_dnp_ppd: invalid driver id '%s'", driver);
+        return NULL;
+    }
+
+    if (generate_dnp_ppd(g_native_lib_dir, g_ppddir, g_stp_data_path, driver) != 0)
+    {
+        set_last_error("generate_cups_dnp_ppd: could not generate PPD for driver '%s' (see log)", driver);
+        return NULL;
+    }
+    snprintf(g_dnp_ppd_path, sizeof(g_dnp_ppd_path), "%s/stp-%s.5.3.ppd", g_ppddir, driver);
+    LOG("generate_cups_dnp_ppd: driver=%s -> %s", driver, g_dnp_ppd_path);
+    return g_dnp_ppd_path;
+}
+
+#else // not Android
+
+FFI_PLUGIN_EXPORT int32_t start_cups_server(const char *server_root, const char *native_lib_dir, const char *data_dir, const char *doc_root)
+{
+    (void)server_root;
+    (void)native_lib_dir;
+    (void)data_dir;
+    (void)doc_root;
+    set_last_error("start_cups_server is only supported on Android");
+    return -1;
+}
+
+FFI_PLUGIN_EXPORT void stop_cups_server(void)
+{
+    // no-op off Android
+}
+
+FFI_PLUGIN_EXPORT int start_usb_fd_server(const char *sock_path, int usb_fd)
+{
+    (void)sock_path;
+    (void)usb_fd;
+    set_last_error("start_usb_fd_server is only supported on Android");
+    return -1;
+}
+
+FFI_PLUGIN_EXPORT void stop_usb_fd_server(void)
+{
+    // no-op off Android
+}
+
+FFI_PLUGIN_EXPORT const char *cups_usb_fd_sock_path(void)
+{
+    return NULL;
+}
+
+FFI_PLUGIN_EXPORT const char *generate_cups_dnp_ppd(const char *driver)
+{
+    (void)driver;
+    set_last_error("generate_cups_dnp_ppd is only supported on Android");
+    return NULL;
+}
+
+#endif // __ANDROID__
+
+// add_cups_printer: CUPS-Add-Modify-Printer over IPP against the current server
+// (which on Android is the in-app cupsd targeted by start_cups_server). Available
+// on all CUPS platforms (macOS/Linux/Android). On Windows it is unsupported.
+FFI_PLUGIN_EXPORT bool add_cups_printer(const char *name, const char *device_uri, const char *ppd_or_model)
+{
+#ifdef _WIN32
+    (void)name;
+    (void)device_uri;
+    (void)ppd_or_model;
+    set_last_error("add_cups_printer is not supported on Windows");
+    return false;
+#else
+    set_last_error("");
+    if (!name || !device_uri)
+    {
+        set_last_error("add_cups_printer: name and device_uri are required");
+        return false;
+    }
+
+    LOG("add_cups_printer: name=%s device_uri=%s model=%s", name, device_uri,
+        ppd_or_model ? ppd_or_model : "(null)");
+
+    // Build the printer-uri for the admin op: ipp://<server>:<port>/printers/<name>
+    char printer_uri[HTTP_MAX_URI];
+    httpAssembleURIf(HTTP_URI_CODING_ALL, printer_uri, sizeof(printer_uri), "ipp", NULL,
+                     cupsServer(), ippPort(), "/printers/%s", name);
+
+    http_t *http = httpConnectEncrypt(cupsServer(), ippPort(), HTTP_ENCRYPT_IF_REQUESTED);
+    if (!http)
+    {
+        set_last_error("add_cups_printer: failed to connect to CUPS server %s:%d", cupsServer(), ippPort());
+        return false;
+    }
+
+    ipp_t *request = ippNewRequest(IPP_OP_CUPS_ADD_MODIFY_PRINTER);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", NULL, printer_uri);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, cupsUser());
+    // Printer state: idle + accepting jobs + enabled.
+    ippAddInteger(request, IPP_TAG_PRINTER, IPP_TAG_ENUM, "printer-state", IPP_PSTATE_IDLE);
+    ippAddBoolean(request, IPP_TAG_PRINTER, "printer-is-accepting-jobs", 1);
+    ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_URI, "device-uri", NULL, device_uri);
+
+    // Model / interface. Three cases:
+    //  (1) ppd_or_model is an ABSOLUTE path to a readable .ppd file -> upload the PPD
+    //      FILE directly via cupsDoFileRequest (the `lpadmin -P file.ppd` mechanism).
+    //      This installs the queue from the exact PPD and does NOT invoke cups-driverd
+    //      to resolve a ppd-name — critical on Android, where cups-driverd resolution
+    //      is slow/fragile. We set NO ppd-name in this branch.
+    //  (2) NULL/empty/"raw" -> a raw queue (ppd-name=raw).
+    //  (3) otherwise -> a ppd-name string, resolved server-side by cups-driverd.
+    const char *model = (ppd_or_model && *ppd_or_model) ? ppd_or_model : "raw";
+    const char *ppd_file = NULL;
+    {
+        // Treat as a PPD file only if it's an absolute path ending in .ppd that we
+        // can actually read. Guarded so bare model strings / "raw" fall through.
+        size_t mlen = strlen(model);
+        if (model[0] == '/' && mlen > 4 &&
+            strcmp(model + mlen - 4, ".ppd") == 0 &&
+            access(model, R_OK) == 0)
+        {
+            ppd_file = model;
+        }
+    }
+
+    if (ppd_file == NULL)
+    {
+        if (strcmp(model, "raw") == 0)
+        {
+            ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_NAME, "ppd-name", NULL, "raw");
+        }
+        else
+        {
+            ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_NAME, "ppd-name", NULL, model);
+        }
+    }
+    // else: no ppd-name; the PPD file is sent as the request body below.
+
+    ipp_t *response = ppd_file
+                          ? cupsDoFileRequest(http, request, "/admin/", ppd_file)
+                          : cupsDoRequest(http, request, "/admin/");
+    if (!response)
+    {
+        set_last_error("add_cups_printer: CUPS-Add-Modify-Printer failed: %s", cupsLastErrorString());
+        httpClose(http);
+        return false;
+    }
+
+    ipp_status_t status = ippGetStatusCode(response);
+    bool ok = (status <= IPP_OK_CONFLICT);
+    if (!ok)
+    {
+        set_last_error("add_cups_printer: CUPS-Add-Modify-Printer status %s: %s",
+                       ippErrorString(status), cupsLastErrorString());
+    }
+    ippDelete(response);
+    httpClose(http);
+
+    if (ok)
+        LOG("add_cups_printer: SUCCESS for '%s'%s", name,
+            ppd_file ? " (uploaded PPD file, no cups-driverd)" : "");
+    return ok;
+#endif
+}
+
+// remove_cups_printer: CUPS-Delete-Printer over IPP against the current server
+// (which on Android is the in-app cupsd targeted by start_cups_server). Mirrors
+// add_cups_printer's style. Available on all CUPS platforms; unsupported on Windows.
+FFI_PLUGIN_EXPORT bool remove_cups_printer(const char *name)
+{
+#ifdef _WIN32
+    (void)name;
+    set_last_error("remove_cups_printer is not supported on Windows");
+    return false;
+#else
+    set_last_error("");
+    if (!name || !*name)
+    {
+        set_last_error("remove_cups_printer: name is required");
+        return false;
+    }
+
+    LOG("remove_cups_printer: name=%s", name);
+
+    // Build the printer-uri for the admin op: ipp://<server>:<port>/printers/<name>
+    char printer_uri[HTTP_MAX_URI];
+    httpAssembleURIf(HTTP_URI_CODING_ALL, printer_uri, sizeof(printer_uri), "ipp", NULL,
+                     cupsServer(), ippPort(), "/printers/%s", name);
+
+    http_t *http = httpConnectEncrypt(cupsServer(), ippPort(), HTTP_ENCRYPT_IF_REQUESTED);
+    if (!http)
+    {
+        set_last_error("remove_cups_printer: failed to connect to CUPS server %s:%d", cupsServer(), ippPort());
+        return false;
+    }
+
+    ipp_t *request = ippNewRequest(IPP_OP_CUPS_DELETE_PRINTER);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", NULL, printer_uri);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, cupsUser());
+
+    ipp_t *response = cupsDoRequest(http, request, "/admin/");
+    if (!response)
+    {
+        set_last_error("remove_cups_printer: CUPS-Delete-Printer failed: %s", cupsLastErrorString());
+        httpClose(http);
+        return false;
+    }
+
+    ipp_status_t status = ippGetStatusCode(response);
+    // Treat "not found" as success (idempotent removal on detach).
+    bool ok = (status <= IPP_OK_CONFLICT) || (status == IPP_STATUS_ERROR_NOT_FOUND);
+    if (!ok)
+    {
+        set_last_error("remove_cups_printer: CUPS-Delete-Printer status %s: %s",
+                       ippErrorString(status), cupsLastErrorString());
+    }
+    ippDelete(response);
+    httpClose(http);
+
+    if (ok)
+        LOG("remove_cups_printer: SUCCESS for '%s'", name);
+    return ok;
+#endif
+}
+
 FFI_PLUGIN_EXPORT bool print_pdf(const char *printer_name, const char *pdf_file_path, const char *doc_name, int scaling_mode, int copies, const char *page_range, int num_options, const char **option_keys, const char **option_values, const char *alignment)
 {
     LOG("print_pdf called for printer: '%s', path: '%s', doc: '%s'", printer_name, pdf_file_path, doc_name);
@@ -1719,6 +2836,13 @@ FFI_PLUGIN_EXPORT int open_printer_properties(const char *printer_name, intptr_t
     ClosePrinter(hPrinter);
     free(printer_name_w);
     return return_status;
+#elif defined(__ANDROID__)
+    // No xdg-open / desktop browser on Android. The CUPS web interface is also
+    // disabled in the bundled cupsd config. Not supported here.
+    (void)hwnd;
+    (void)printer_name;
+    LOG("open_printer_properties is not supported on Android");
+    return 0; // Error / unsupported
 #else
     (void)hwnd; // hwnd is Windows-specific
     if (!printer_name)
@@ -2431,6 +3555,50 @@ FFI_PLUGIN_EXPORT int32_t submit_pdf_job(const char *printer_name, const char *p
     }
     cupsFreeOptions(num_cups_options, options);
     LOG("submit_pdf_job finished with job_id: %d", job_id);
+    return job_id > 0 ? job_id : 0;
+#endif
+}
+
+// Submit an arbitrary file to CUPS and let it auto-detect the MIME/document
+// format from the file contents (e.g. image/jpeg, image/png, application/pdf).
+// This intentionally does NOT force a document-format option, so it works for
+// images and any other type CUPS can sniff. Returns the job id on success, 0 on
+// failure (get_last_error has details). Not supported on Windows (returns 0).
+FFI_PLUGIN_EXPORT int32_t submit_file_job(const char *printer_name, const char *file_path, const char *doc_name, int num_options, const char **option_keys, const char **option_values)
+{
+    LOG("submit_file_job called for printer: '%s', path: '%s', doc: '%s'", printer_name, file_path, doc_name);
+
+    if (!printer_name || !file_path || !doc_name)
+    {
+        set_last_error("Printer name, file path, and document name cannot be null.");
+        return 0;
+    }
+
+#ifdef _WIN32
+    set_last_error("submit_file_job is not supported on Windows.");
+    return 0;
+#else // macOS / Linux / Android (CUPS)
+    cups_option_t *options = NULL;
+    int num_cups_options = 0;
+    for (int i = 0; i < num_options; i++)
+    {
+        if (option_keys && option_keys[i] && option_values && option_values[i])
+        {
+            num_cups_options = cupsAddOption(option_keys[i], option_values[i], num_cups_options, &options);
+        }
+    }
+
+    // Let CUPS auto-detect the document format from the file contents. We do not
+    // add a "document-format" option so image/jpeg, image/png, application/pdf,
+    // etc. are all handled by the server's MIME rules.
+    int job_id = cupsPrintFile(printer_name, file_path, doc_name, num_cups_options, options);
+    if (job_id <= 0)
+    {
+        set_last_error("cupsPrintFile failed for '%s': %s", file_path, cupsLastErrorString());
+        LOG("cupsPrintFile failed, error: %s", cupsLastErrorString());
+    }
+    cupsFreeOptions(num_cups_options, options);
+    LOG("submit_file_job finished with job_id: %d", job_id);
     return job_id > 0 ? job_id : 0;
 #endif
 }
