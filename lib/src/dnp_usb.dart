@@ -59,8 +59,11 @@ class DnpUsbPrinter {
 /// Orchestrates DNP USB auto-detect end-to-end:
 ///
 ///   plug -> Kotlin detects + (auto or prompt) opens -> "opened" event with fd ->
-///   startUsbFdServer(fd) -> addCupsPrinter(gutenprint53+usb URI) -> ready to print.
-///   unplug -> "detached" event -> stopUsbFdServer + removeCupsPrinter + close.
+///   startUsbFdServer(fd) -> addCupsPrinter(gutenprint53+usb URI) IF the queue does
+///   not already exist -> ready to print.
+///   unplug -> "detached" event -> stopUsbFdServer + closeDevice. The CUPS queue is
+///   KEPT (not removed) so the user's default options survive a replug; on the next
+///   plug the existing queue is reused and only the fd-server is restarted.
 ///
 /// Persistence: a device's signature (vid:pid:serial) is stored in
 /// shared_preferences the first time it's opened; on app start / attach of a known
@@ -239,18 +242,32 @@ class DnpUsb {
       PrintingFfi.instance.startUsbFdServer(sockPath: sock, fd: fd);
       _log('startUsbFdServer OK sock=$sock fd=$fd');
 
-      // Generate/select the PPD for the ACTUAL detected model (e.g. DS-RX1 ->
-      // dnp-dsrx1) and pass its ABSOLUTE path to addCupsPrinter, which uploads the
-      // PPD file directly (no cups-driverd). Falls back to the always-present DS620
-      // PPD, or to a plain "raw" queue if PPD generation is unavailable.
-      final ppd = _resolvePpdPath(make);
-      final model = ppd ?? 'raw';
-      PrintingFfi.instance.addCupsPrinter(
-        name: queueName,
-        deviceUri: _deviceUri(serial: serial, make: make),
-        model: model,
-      );
-      _log('addCupsPrinter OK name=$queueName model=$model');
+      // Only CREATE the queue if it doesn't already exist. On a replug of the same
+      // printer — or an app restart with it still attached — the queue persists in
+      // cupsd (we no longer delete it on detach). Re-adding would re-upload the PPD
+      // and RESET the user's default options (media size, quality, ...), which is
+      // exactly the "settings not preserved across replug" bug. The queue name is
+      // derived from vid:pid:serial, so it's stable for a given physical printer.
+      // Only the fd-server needs (re)starting on a replug — the fd is new, the queue
+      // and its settings are not.
+      final alreadyExists =
+          PrintingFfi.instance.listPrinters().any((p) => p.name == queueName);
+      if (alreadyExists) {
+        _log('queue $queueName already exists — reusing it (settings preserved)');
+      } else {
+        // Generate/select the PPD for the ACTUAL detected model (e.g. DS-RX1 ->
+        // dnp-dsrx1) and pass its ABSOLUTE path to addCupsPrinter, which uploads the
+        // PPD file directly (no cups-driverd). Falls back to the always-present DS620
+        // PPD, or to a plain "raw" queue if PPD generation is unavailable.
+        final ppd = _resolvePpdPath(make);
+        final model = ppd ?? 'raw';
+        PrintingFfi.instance.addCupsPrinter(
+          name: queueName,
+          deviceUri: _deviceUri(serial: serial, make: make),
+          model: model,
+        );
+        _log('addCupsPrinter OK name=$queueName model=$model');
+      }
 
       printer = printer.copyWith(ready: true);
       _byDevice[deviceName] = printer;
@@ -271,20 +288,20 @@ class DnpUsb {
       _log('detached $deviceName (not tracked)');
       return;
     }
-    _log('detached ${printer.queueName} — tearing down');
-    status.value = 'DNP USB: ${printer.modelName} removed';
+    _log('detached ${printer.queueName} — stopping fd server (queue kept)');
+    status.value = 'DNP USB: ${printer.modelName} unplugged';
 
-    // Reverse order of the attach flow: stop serving the fd, drop the queue,
-    // then close the Kotlin-owned connection.
+    // Stop serving the fd and close the Kotlin-owned connection. We intentionally
+    // do NOT removeCupsPrinter: keeping the queue preserves the user's default
+    // options across an unplug/replug (removing + re-adding resets them from the
+    // PPD defaults — the reported bug). The queue simply has no live fd until the
+    // printer is plugged back in (jobs queue and retry meanwhile); the fd-server is
+    // restarted on the next "opened" event. To forget a printer entirely, call
+    // removeCupsPrinter explicitly (e.g. from a "remove printer" UI action).
     try {
       PrintingFfi.instance.stopUsbFdServer();
     } catch (e) {
       _log('stopUsbFdServer failed: $e');
-    }
-    try {
-      PrintingFfi.instance.removeCupsPrinter(name: printer.queueName);
-    } catch (e) {
-      _log('removeCupsPrinter failed: $e');
     }
     try {
       await _method.invokeMethod('closeDevice', {'deviceName': deviceName});
