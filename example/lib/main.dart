@@ -1080,11 +1080,69 @@ class _PrintingScreenState extends State<PrintingScreen> {
                 icon: const Icon(Icons.image, size: 16),
                 label: const Text('Pick & print image'),
               ),
+              // General CUPS web admin (/admin) — the bundled cupsd settings page.
+              OutlinedButton.icon(
+                onPressed: () => PrintingFfi.instance.openCupsSettings(context),
+                icon: const Icon(Icons.settings, size: 16),
+                label: const Text('Open CUPS settings'),
+              ),
+              // Reads IPP attributes of the selected printer via the bundled cupsd —
+              // proves cupsGetPrinterAttributes now works on Android.
+              OutlinedButton.icon(
+                onPressed: _readCupsAttributes,
+                icon: const Icon(Icons.info_outline, size: 16),
+                label: const Text('Read printer attributes'),
+              ),
             ],
           ),
         ],
       ),
     );
+  }
+
+  /// Android/CUPS test: read a few IPP attributes of the selected printer through
+  /// the bundled cupsd. Before the `_isCups` fix this threw "only supported on
+  /// macOS and Linux" on Android; now it round-trips against the in-app cupsd.
+  Future<void> _readCupsAttributes() async {
+    final printer = _selectedPrinter;
+    if (printer == null) {
+      _showToast('Select a printer first', isError: true);
+      return;
+    }
+    try {
+      final attrs = await PrintingFfi.instance.cupsGetPrinterAttributes(
+        printer.name,
+        const [
+          'printer-state',
+          'printer-state-reasons',
+          'printer-make-and-model',
+          'printer-is-accepting-jobs',
+          'media-default',
+        ],
+      );
+      final text = attrs
+          .map((a) => '${a.name}: ${a.value ?? a.values?.join(', ') ?? ''}')
+          .join('\n');
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text('Attributes: ${printer.name}'),
+          content: SingleChildScrollView(
+            child: Text(text.isEmpty ? '(no attributes returned)' : text),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      _showToast('Read attributes failed: $e', isError: true);
+    }
   }
 
   /// DNP dye-sub USB auto-detect status + detected-printer list. Plug a DNP printer
