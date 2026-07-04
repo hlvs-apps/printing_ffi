@@ -1,0 +1,21 @@
+Android/bionic has no pthread_cancel(). CUPS's _cupsThreadCancel() wraps it but
+that helper has NO callers anywhere in the 2.4.19 tree outside thread.c itself
+(verified by grep), so making it a no-op on Android is safe and keeps the private
+API symbol present. Scoped to __ANDROID__.
+
+--- a/cups/thread.c
++++ b/cups/thread.c
+@@ -165,7 +165,13 @@
+ void
+ _cupsThreadCancel(_cups_thread_t thread)/* I - Thread ID */
+ {
++#  ifdef __ANDROID__
++  /* bionic has no pthread_cancel(); this helper is unused internally, so make
++   * it a no-op rather than fail to link. */
++  (void)thread;
++#  else
+   pthread_cancel(thread);
++#  endif /* __ANDROID__ */
+ }
+ 
+ 

@@ -1,4 +1,16 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- USB host access (DNP dye-sub over USB). No runtime permission needed for
+         the UsbManager APIs themselves; USB_PERMISSION is granted per-device via
+         the system dialog. usb.host feature is required. -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="true" />
+    <!-- Foreground service so Android doesn't kill the app (and cupsd + fd-server +
+         the live UsbDeviceConnection) mid dye-sub job (many seconds). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- targetSdk 34+ requires a typed FGS permission. "connectedDevice" fits a USB
+         printer job (data exchange with an attached device). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Notification the FGS posts (required to be visible on Android 13+). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application
         android:label="printing_ffi_example"
         android:name="${applicationName}"
@@ -24,7 +36,22 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- Offer to open the app when a matching DNP/Citizen USB printer is
+                 plugged in, and let the user tick "use by default" (persists the
+                 USB permission for that device). The device_filter lists the exact
+                 DNP/Citizen VID/PIDs the Gutenprint dnpds40 backend supports. -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/usb_device_filter" />
         </activity>
+        <!-- Foreground service kept alive across a dye-sub USB job. -->
+        <service
+            android:name=".DnpUsbForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

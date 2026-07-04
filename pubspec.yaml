@@ -22,6 +22,11 @@ dependencies:
   flutter:
     sdk: flutter
   plugin_platform_interface: ^2.0.2
+  # Android only: renders the bundled cupsd web interface in-app for
+  # openCupsSettings()/openCupsPrinterSettings(). webview_flutter's native side is
+  # Android/iOS; on desktop it is an inert, never-instantiated dependency (the web
+  # UI helpers no-op off Android).
+  webview_flutter: ^4.10.0
 
 dev_dependencies:
   ffigen: ^20.0.0-dev.1
@@ -49,6 +54,8 @@ flutter:
   # Please refer to README.md for a detailed explanation.
   plugin:
     platforms:
+      android:
+        ffiPlugin: true
       linux:
         ffiPlugin: true
       macos:

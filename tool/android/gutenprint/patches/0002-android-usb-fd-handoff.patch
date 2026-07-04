@@ -1,0 +1,253 @@
+Android USB fd-handoff for the dye-sub (DNP) backend.
+
+On Android a non-root process cannot enumerate/open USB via usbfs. The app opens
+the USB device through android.hardware.usb.UsbManager
+(UsbDeviceConnection.getFileDescriptor()) and hands the raw fd to this backend.
+libusb's supported mechanism is:
+
+    libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);  // before libusb_init
+    libusb_wrap_sys_device(NULL, (intptr_t)fd, &handle);         // wrap the app fd
+
+NO_DEVICE_DISCOVERY MUST be set BEFORE libusb_init(): on unrooted Android,
+libusb_init() otherwise scans /dev/bus/usb (usbfs), has no permission, and
+returns -1 ("Failed to initialize libusb (-1)"). So the fd-get + NO_DEVICE_
+DISCOVERY block runs immediately BEFORE libusb_init(NULL), and the single
+printing_ffi_fd declaration is in scope for the later wrap path too.
+
+Because cupsd starts BEFORE the USB device is plugged/opened, the fd must be
+delivered at job time. Primary transport: SCM_RIGHTS over an AF_UNIX socket whose
+path comes from env PRINTING_FFI_USB_FD_SOCK (the app serves the fd there when a
+job is dispatched). Fallback for bench testing: a raw integer fd inherited from
+the parent via env PRINTING_FFI_USB_FD.
+
+When an fd is obtained, NO_DEVICE_DISCOVERY is set (before init) and the
+enumerate+open path is replaced by libusb_wrap_sys_device(). conn (iface/altset/
+endp_up/endp_down/bus/port) is derived from the wrapped handle's active config
+descriptor, mirroring probe_device()'s endpoint-selection loop. Serial/URI
+matching becomes advisory in this path (the app already picked the device it owns
+the fd for).
+
+All new code is guarded by #ifdef __ANDROID__ so desktop builds are unchanged.
+This patch stays GPL (it patches the exec'd GPL backend); it is NOT copied into
+the MIT plugin source.
+
+--- a/src/cups/backend_common.c
++++ b/src/cups/backend_common.c
+@@ -28,6 +28,12 @@
+ #include <errno.h>
+ #include <signal.h>
+ #include <strings.h>  /* For strncasecmp */
++#ifdef __ANDROID__
++#include <sys/socket.h>   /* AF_UNIX, recvmsg, SCM_RIGHTS */
++#include <sys/un.h>
++#include <string.h>
++/* PRINTING_FFI USB fd-handoff: see patches/0002-android-usb-fd-handoff.patch */
++#endif
+ 
+ #define BACKEND_VERSION "0.134G"
+ 
+@@ -46,6 +52,146 @@
+ #define USB_INTERFACE_PROTOCOL_BIDIR 0x2
+ #define USB_INTERFACE_PROTOCOL_IPP   0x4
+ 
++#ifdef __ANDROID__
++/* ----------------------------------------------------------------------------
++ * Android USB fd-handoff (PRINTING_FFI) — see the patch header for rationale.
++ * The app opens the USB device via UsbManager and passes us the raw fd, either
++ * over an AF_UNIX socket via SCM_RIGHTS (PRINTING_FFI_USB_FD_SOCK, primary) or
++ * as an inherited integer fd (PRINTING_FFI_USB_FD, bench fallback).
++ * -------------------------------------------------------------------------- */
++
++/* Connect to sockpath (AF_UNIX) and receive a single fd via SCM_RIGHTS.
++ * Returns the received fd (>=0) on success, -1 on failure. */
++static int printing_ffi_recv_fd(const char *sockpath)
++{
++	int s = socket(AF_UNIX, SOCK_STREAM, 0);
++	if (s < 0) {
++		ERROR("PRINTING_FFI: socket() failed: %s\n", strerror(errno));
++		return -1;
++	}
++
++	struct sockaddr_un addr;
++	memset(&addr, 0, sizeof(addr));
++	addr.sun_family = AF_UNIX;
++	strncpy(addr.sun_path, sockpath, sizeof(addr.sun_path) - 1);
++
++	if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
++		ERROR("PRINTING_FFI: connect(%s) failed: %s\n", sockpath, strerror(errno));
++		close(s);
++		return -1;
++	}
++
++	/* recvmsg: one dummy data byte + a SCM_RIGHTS control message carrying the fd */
++	char data = 0;
++	struct iovec iov = { .iov_base = &data, .iov_len = 1 };
++	union {
++		struct cmsghdr align;
++		char buf[CMSG_SPACE(sizeof(int))];
++	} cmsgu;
++	struct msghdr msg;
++	memset(&msg, 0, sizeof(msg));
++	msg.msg_iov = &iov;
++	msg.msg_iovlen = 1;
++	msg.msg_control = cmsgu.buf;
++	msg.msg_controllen = sizeof(cmsgu.buf);
++
++	ssize_t n = recvmsg(s, &msg, 0);
++	if (n < 0) {
++		ERROR("PRINTING_FFI: recvmsg failed: %s\n", strerror(errno));
++		close(s);
++		return -1;
++	}
++
++	int fd = -1;
++	struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
++	if (cmsg && cmsg->cmsg_level == SOL_SOCKET &&
++	    cmsg->cmsg_type == SCM_RIGHTS &&
++	    cmsg->cmsg_len == CMSG_LEN(sizeof(int))) {
++		memcpy(&fd, CMSG_DATA(cmsg), sizeof(int));
++	} else {
++		ERROR("PRINTING_FFI: no SCM_RIGHTS fd in control message\n");
++	}
++
++	close(s);
++	return fd;
++}
++
++/* Obtain the app-provided USB fd from the environment: socket first, then the
++ * raw integer fallback. Returns fd (>=0) if one was provided, else -1. */
++static int printing_ffi_get_usb_fd(void)
++{
++	const char *sockpath = getenv("PRINTING_FFI_USB_FD_SOCK");
++	if (sockpath && strlen(sockpath)) {
++		int fd = printing_ffi_recv_fd(sockpath);
++		if (fd >= 0) {
++			DEBUG("PRINTING_FFI: received USB fd %d over socket %s\n", fd, sockpath);
++			return fd;
++		}
++		/* Fall through to try the raw-int env if the socket failed. */
++	}
++	const char *fdstr = getenv("PRINTING_FFI_USB_FD");
++	if (fdstr && strlen(fdstr)) {
++		int fd = atoi(fdstr);
++		if (fd >= 0) {
++			DEBUG("PRINTING_FFI: using inherited USB fd %d\n", fd);
++			return fd;
++		}
++	}
++	return -1;
++}
++
++/* Derive iface/altset/endp_up/endp_down/bus/port for a wrapped handle by
++ * inspecting its active config descriptor. Mirrors probe_device()'s
++ * endpoint-selection loop (first interface/altset with a bulk IN+OUT pair,
++ * skipping IPP-over-USB). Returns 0 on success, -1 if no candidate found. */
++static int printing_ffi_fill_conn(struct dyesub_connection *conn)
++{
++	struct libusb_device *device = libusb_get_device(conn->dev);
++	struct libusb_config_descriptor *config = NULL;
++	uint8_t iface, altset;
++	int i, ret = -1;
++
++	if (!device || libusb_get_active_config_descriptor(device, &config))
++		return -1;
++
++	for (iface = 0; iface < config->bNumInterfaces; iface++) {
++		for (altset = 0; altset < config->interface[iface].num_altsetting; altset++) {
++			const struct libusb_interface_descriptor *ad =
++				&config->interface[iface].altsetting[altset];
++			uint8_t endp_up = 0, endp_down = 0;
++			if (ad->bNumEndpoints < 2)
++				continue;
++			/* Exclude IPP-over-USB, same as probe_device */
++			if (ad->bInterfaceClass == LIBUSB_CLASS_PRINTER &&
++			    ad->bInterfaceSubClass == USB_SUBCLASS_PRINTER &&
++			    ad->bInterfaceProtocol == USB_INTERFACE_PROTOCOL_IPP)
++				continue;
++			for (i = 0; i < ad->bNumEndpoints; i++) {
++				if ((ad->endpoint[i].bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) == LIBUSB_TRANSFER_TYPE_BULK) {
++					if (ad->endpoint[i].bEndpointAddress & LIBUSB_ENDPOINT_IN)
++						endp_up = ad->endpoint[i].bEndpointAddress;
++					else
++						endp_down = ad->endpoint[i].bEndpointAddress;
++				}
++				if (endp_up && endp_down) {
++					conn->iface = iface;
++					conn->altset = altset;
++					conn->endp_up = endp_up;
++					conn->endp_down = endp_down;
++					conn->bus_num = libusb_get_bus_number(device);
++					conn->port_num = libusb_get_port_number(device);
++					ret = 0;
++					goto out;
++				}
++			}
++		}
++	}
++out:
++	libusb_free_config_descriptor(config);
++	return ret;
++}
++#endif /* __ANDROID__ */
++
+ /* Global Variables */
+ int dyesub_debug = 0;
+ int terminate = 0;
+@@ -1447,6 +1593,14 @@
+ #endif
+ 
+ 	/* Libusb setup */
++#ifdef __ANDROID__
++	/* PRINTING_FFI USB fd-handoff: get the app-provided fd and disable usbfs
++	 * device discovery BEFORE libusb_init (unrooted Android: init scans
++	 * /dev/bus/usb and returns -1 otherwise). */
++	int printing_ffi_fd = printing_ffi_get_usb_fd();
++	if (printing_ffi_fd >= 0)
++		libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
++#endif
+ 	ret = libusb_init(NULL);
+ 	if (ret) {
+ 		ERROR("Failed to initialize libusb (%d)\n", ret);
+@@ -1473,6 +1627,32 @@
+ 	/* Enumerate devices */
+ 	STATE("+connecting-to-device\n");
+ 
++#ifdef __ANDROID__
++	if (printing_ffi_fd >= 0) {
++		/* fd-handoff path: wrap the app-provided fd directly (no usbfs scan).
++		 * Serial/URI matching is advisory here — the app owns the fd. */
++		ret = libusb_wrap_sys_device(NULL, (intptr_t)printing_ffi_fd, &conn.dev);
++		if (ret || !conn.dev) {
++			ERROR("PRINTING_FFI: libusb_wrap_sys_device(fd=%d) failed (%d)\n",
++			      printing_ffi_fd, ret);
++			ret = CUPS_BACKEND_FAILED;
++			goto done;
++		}
++		if (printing_ffi_fill_conn(&conn)) {
++			ERROR("PRINTING_FFI: could not derive endpoints from wrapped fd\n");
++			libusb_close(conn.dev);
++			conn.dev = NULL;
++			ret = CUPS_BACKEND_FAILED;
++			goto done;
++		}
++		STATE("-offline-report\n");
++		DEBUG("PRINTING_FFI: wrapped fd -> iface %d altset %d endp_up %02x endp_down %02x\n",
++		      conn.iface, conn.altset, conn.endp_up, conn.endp_down);
++		/* conn.dev is open; skip the enumerate+libusb_open block below. */
++		goto printing_ffi_have_dev;
++	}
++#endif
++
+ 	found = find_and_enumerate(argv0, &list, backend, use_serno, backend_str, 0, NUM_CLAIM_ATTEMPTS, &conn);
+ 
+ 	if (found == -1) {
+@@ -1496,6 +1676,9 @@
+ 		ret = CUPS_BACKEND_RETRY_CURRENT;
+ 		goto done;
+ 	}
++#ifdef __ANDROID__
++printing_ffi_have_dev:
++#endif
+ 
+ 	/* Detach the kernel driver */
+ 	if (libusb_kernel_driver_active(conn.dev, conn.iface)) {

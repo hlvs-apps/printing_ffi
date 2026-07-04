@@ -8,6 +8,9 @@ import 'package:printing_ffi/printing_ffi_bindings_generated.dart' hide PrinterA
 import 'models/models.dart';
 
 export 'models/models.dart';
+// Android web-UI helpers: CupsWebView widget + openCupsSettings() /
+// openCupsPrinterSettings() extension on PrintingFfi (in-app cupsd settings pages).
+export 'src/cups_web_ui.dart';
 
 void _remapCupsOptions(Map<String, String> options) {
   if (Platform.isMacOS || Platform.isLinux) {
@@ -127,12 +130,20 @@ class PrintingFfi {
       }
     }
     if (Platform.isLinux) return DynamicLibrary.open('lib$_libName.so');
+    if (Platform.isAndroid) return DynamicLibrary.open('lib$_libName.so');
     if (Platform.isWindows) return DynamicLibrary.open('$_libName.dll');
     throw UnsupportedError('Unknown platform: ${Platform.operatingSystem}');
   }();
 
   /// The bindings to the native functions. This is final and initialized by the constructors.
   final PrintingFfiBindings _bindings;
+
+  /// The localhost port the bundled Android cupsd is listening on, as returned by
+  /// the most recent successful [startCupsServer]. `null` before cupsd is started
+  /// (or after [stopCupsServer], or off Android). Backs [cupsServerPort] so the
+  /// web-UI helpers ([openCupsSettings]/[openCupsPrinterSettings]) can reach the
+  /// server without the app having to hold the port itself.
+  int? _cupsServerPort;
 
   /// Internal constructor for creating the singleton instance.
   PrintingFfi._() : _bindings = PrintingFfiBindings(_dylib); // Private constructor
@@ -228,6 +239,223 @@ class PrintingFfi {
     } finally {
       _bindings.free_printer_info(printerInfoPtr);
     }
+  }
+
+  /// Android only: boots the bundled CUPS scheduler (cupsd) inside the app
+  /// sandbox at the app's own uid, and points the libcups client at it so all
+  /// the existing CUPS calls ([listPrinters], etc.) talk to it over IPP.
+  ///
+  /// - [serverRoot]: an app-writable dir for config/spool/logs (e.g. filesDir/cups).
+  /// - [nativeLibDir]: `applicationInfo.nativeLibraryDir` (where the bundled
+  ///   cupsd/backends/filters were extracted as `lib*.so`).
+  /// - [dataDir]: a dir containing `share/cups/{mime,data,templates}` extracted from assets.
+  /// - [docRoot]: the web-interface DocumentRoot (static index.html/css/images
+  ///   extracted from assets). Pass `null` to run cupsd without the styled web UI.
+  ///
+  /// Returns the localhost port cupsd is listening on, or throws on failure.
+  int startCupsServer({
+    required String serverRoot,
+    required String nativeLibDir,
+    required String dataDir,
+    String? docRoot,
+  }) {
+    if (!Platform.isAndroid) {
+      throw PrintingFfiException('startCupsServer is only supported on Android');
+    }
+    final serverRootPtr = serverRoot.toNativeUtf8();
+    final nativeLibDirPtr = nativeLibDir.toNativeUtf8();
+    final dataDirPtr = dataDir.toNativeUtf8();
+    final docRootPtr = (docRoot ?? '').toNativeUtf8();
+    try {
+      final port = _bindings.start_cups_server(
+        serverRootPtr.cast(),
+        nativeLibDirPtr.cast(),
+        dataDirPtr.cast(),
+        docRootPtr.cast(),
+      );
+      if (port <= 0) {
+        throw PrintingFfiException('Failed to start bundled cupsd: ${_getLastError()}');
+      }
+      _cupsServerPort = port;
+      return port;
+    } finally {
+      malloc.free(serverRootPtr);
+      malloc.free(nativeLibDirPtr);
+      malloc.free(dataDirPtr);
+      malloc.free(docRootPtr);
+    }
+  }
+
+  /// Android only: terminates the bundled cupsd started by [startCupsServer].
+  void stopCupsServer() {
+    if (!Platform.isAndroid) return;
+    _bindings.stop_cups_server();
+    _cupsServerPort = null;
+  }
+
+  /// The localhost port the bundled Android cupsd is listening on, or `null` if it
+  /// has not been started yet (or was stopped, or off Android). Set by
+  /// [startCupsServer]; consumed by the web-UI helpers so an app never has to track
+  /// the port itself.
+  int? get cupsServerPort => _cupsServerPort;
+
+  /// Base URL of the bundled cupsd web interface (`http://127.0.0.1:<port>`), or
+  /// `null` if cupsd is not running. Append `/admin`, `/printers/<name>`, `/jobs/`,
+  /// etc. to reach a specific page.
+  String? get cupsBaseUrl {
+    final port = _cupsServerPort;
+    return port == null ? null : 'http://127.0.0.1:$port';
+  }
+
+  /// URL of the bundled cupsd admin/settings page (`/admin`), or `null` if cupsd is
+  /// not running. Rendered by [openCupsSettings].
+  String? get cupsSettingsUrl {
+    final base = cupsBaseUrl;
+    return base == null ? null : '$base/admin';
+  }
+
+  /// URL of a single printer's properties/maintenance page
+  /// (`/printers/<name>`), or `null` if cupsd is not running. Rendered by
+  /// [openCupsPrinterSettings].
+  String? cupsPrinterSettingsUrl(String printerName) {
+    final base = cupsBaseUrl;
+    return base == null ? null : '$base/printers/${Uri.encodeComponent(printerName)}';
+  }
+
+  /// The canonical AF_UNIX socket path (`<serverRoot>/usbfd.sock`) the USB
+  /// fd-server binds and the bundled DNP backend connects to. Available after
+  /// [startCupsServer] has run. Returns `null` before that (or off Android).
+  ///
+  /// Pass this to [startUsbFdServer] so C, the backend env (wired by
+  /// [startCupsServer] via a `SetEnv` in cups-files.conf) and Kotlin all agree.
+  String? get usbFdSockPath {
+    if (!Platform.isAndroid) return null;
+    final ptr = _bindings.cups_usb_fd_sock_path();
+    if (ptr == nullptr) return null;
+    return ptr.cast<Utf8>().toDartString();
+  }
+
+  /// Android only: starts the native USB fd-server that hands the app's live USB
+  /// file descriptor to the forked Gutenprint DNP backend over an AF_UNIX socket
+  /// via SCM_RIGHTS.
+  ///
+  /// Call this once the app has opened the target DNP device and holds a
+  /// long-lived fd (`UsbDeviceConnection.getFileDescriptor()` from Kotlin, after
+  /// the user grants USB permission). The server keeps [fd] alive and, on each
+  /// backend connection (at job dispatch), sends a `dup(fd)` — libusb closes the
+  /// wrapped copy at job end, so the original survives across jobs.
+  ///
+  /// - [sockPath]: the socket path; use [usbFdSockPath] (`<serverRoot>/usbfd.sock`).
+  /// - [fd]: the raw USB file descriptor (owned by Kotlin; this server never
+  ///   closes it — only the dups it creates).
+  ///
+  /// Throws [PrintingFfiException] on failure. Call [stopUsbFdServer] when the
+  /// device is detached / permission revoked / the app tears down.
+  void startUsbFdServer({required String sockPath, required int fd}) {
+    if (!Platform.isAndroid) {
+      throw PrintingFfiException('startUsbFdServer is only supported on Android');
+    }
+    final sockPathPtr = sockPath.toNativeUtf8();
+    try {
+      final rc = _bindings.start_usb_fd_server(sockPathPtr.cast(), fd);
+      if (rc != 0) {
+        throw PrintingFfiException('Failed to start USB fd server: ${_getLastError()}');
+      }
+    } finally {
+      malloc.free(sockPathPtr);
+    }
+  }
+
+  /// Android only: stops the USB fd-server started by [startUsbFdServer]. Does
+  /// NOT close the fd passed to [startUsbFdServer] (owned by Kotlin). No-op if no
+  /// server is running or off Android.
+  void stopUsbFdServer() {
+    if (!Platform.isAndroid) return;
+    _bindings.stop_usb_fd_server();
+  }
+
+  /// Android only: generates (if not already present) a Gutenprint PPD for the given
+  /// DNP/Citizen dye-sub [driver] id and returns its absolute on-device path.
+  ///
+  /// [driver] is the Gutenprint driver name — the same value as the DNP USB "make"
+  /// string (e.g. `dnp-dsrx1`, `dnp-ds620`, `dnp-ds820`); it maps directly to
+  /// `<printer driver="…"/>` in Gutenprint's `dyesub.xml`.
+  ///
+  /// Pass the returned path to [addCupsPrinter] as [model]: because it is an absolute
+  /// path to a `.ppd`, the native layer uploads the PPD file directly (the
+  /// `lpadmin -P` mechanism), avoiding cups-driverd entirely. Requires
+  /// [startCupsServer] to have run. Returns `null` on failure (or off Android).
+  String? generateDnpPpd(String driver) {
+    if (!Platform.isAndroid) return null;
+    final driverPtr = driver.toNativeUtf8();
+    try {
+      final ptr = _bindings.generate_cups_dnp_ppd(driverPtr.cast());
+      if (ptr == nullptr) return null;
+      return ptr.cast<Utf8>().toDartString();
+    } finally {
+      malloc.free(driverPtr);
+    }
+  }
+
+  /// Creates or modifies a CUPS queue via the CUPS-Add-Modify-Printer IPP op.
+  ///
+  /// Works against whatever CUPS server the client currently targets (on Android,
+  /// the in-app cupsd booted by [startCupsServer]). [model] defaults to "raw"
+  /// (a raw queue with no PPD).
+  ///
+  /// If [model] is an absolute path to a readable `.ppd` file (e.g. the value
+  /// returned by [generateDnpPpd]), the PPD file is uploaded directly and
+  /// cups-driverd is NOT invoked — the fast, reliable path on Android. Otherwise
+  /// [model] is treated as a ppd-name resolved server-side. Returns true on success.
+  bool addCupsPrinter({
+    required String name,
+    required String deviceUri,
+    String model = 'raw',
+  }) {
+    final namePtr = name.toNativeUtf8();
+    final uriPtr = deviceUri.toNativeUtf8();
+    final modelPtr = model.toNativeUtf8();
+    try {
+      final ok = _bindings.add_cups_printer(
+        namePtr.cast(),
+        uriPtr.cast(),
+        modelPtr.cast(),
+      );
+      if (!ok) {
+        throw PrintingFfiException('Failed to add CUPS printer: ${_getLastError()}');
+      }
+      return ok;
+    } finally {
+      malloc.free(namePtr);
+      malloc.free(uriPtr);
+      malloc.free(modelPtr);
+    }
+  }
+
+  /// Deletes a CUPS queue via the CUPS-Delete-Printer IPP op.
+  ///
+  /// Works against whatever CUPS server the client currently targets (on Android,
+  /// the in-app cupsd booted by [startCupsServer]). Idempotent: deleting a queue
+  /// that no longer exists is treated as success (safe to call on USB detach).
+  /// Returns true on success.
+  bool removeCupsPrinter({required String name}) {
+    final namePtr = name.toNativeUtf8();
+    try {
+      final ok = _bindings.remove_cups_printer(namePtr.cast());
+      if (!ok) {
+        throw PrintingFfiException('Failed to remove CUPS printer: ${_getLastError()}');
+      }
+      return ok;
+    } finally {
+      malloc.free(namePtr);
+    }
+  }
+
+  /// Returns the last native error string (from the calling thread).
+  String _getLastError() {
+    final ptr = _bindings.get_last_error();
+    if (ptr == nullptr) return '';
+    return ptr.cast<Utf8>().toDartString();
   }
 
   Printer _printerFromInfo(PrinterInfo info) {
@@ -406,6 +634,96 @@ class PrintingFfi {
           options: finalOptions,
           alignment: alignment,
         );
+      },
+    );
+  }
+
+  /// Submits an arbitrary file to a CUPS printer, letting the server auto-detect
+  /// the document format (MIME type) from the file contents.
+  ///
+  /// Unlike [printPdf], this does NOT render or transform the document. It simply
+  /// hands the file to CUPS with no forced `document-format`, so images
+  /// (image/jpeg, image/png, ...), PDFs, and any other type CUPS understands are
+  /// all accepted. Whether the printer actually renders the format depends on the
+  /// server's installed filters.
+  ///
+  /// NOTE (image rendering): converting an image to printer raster requires the
+  /// cups-filters / Gutenprint image filters. On the bundled Android cupsd these
+  /// are not present yet, so submitting an image to a *raw* queue sends the file
+  /// bytes unfiltered. This method establishes the submit path; rendering support
+  /// arrives with the DNP/Gutenprint work.
+  ///
+  /// This path is CUPS-only (macOS / Linux / Android). On Windows it is not
+  /// supported and throws.
+  ///
+  /// Returns the CUPS job id (> 0) on success. Throws [PrintingFfiException] on
+  /// failure.
+  Future<int> printFile(
+    String printerName,
+    String filePath, {
+    String docName = 'Flutter Document',
+    int? priority,
+    List<PrintOption> options = const [],
+  }) async {
+    if (Platform.isWindows) {
+      throw PrintingFfiException('printFile is not supported on Windows. Use printPdf or printFileWithDialog instead.');
+    }
+    if (_isCups && priority != null && (priority < 1 || priority > 100)) {
+      throw PrintingFfiException('Priority must be between 1 and 100');
+    }
+    final optionsMap = buildOptions(options);
+    // Alignment/scaling are PDF-render concepts; drop anything that doesn't
+    // apply to a plain file submit.
+    optionsMap.remove('alignment');
+    if (_isCups && priority != null) {
+      optionsMap['job-priority'] = priority.toString();
+    }
+    return _sendFileJobRequest(printerName, filePath, docName: docName, options: optionsMap);
+  }
+
+  /// Convenience wrapper around [printFile] for images.
+  ///
+  /// Submits an image file (jpg/png/etc.) to the given CUPS printer. See
+  /// [printFile] for the important rendering caveat: on a raw/unfiltered queue
+  /// the image is sent as-is until image filters (Gutenprint) are available.
+  Future<int> printImage({
+    required String printerName,
+    required String imagePath,
+    String docName = 'Flutter Image',
+    int? priority,
+    List<PrintOption> options = const [],
+  }) {
+    return printFile(printerName, imagePath, docName: docName, priority: priority, options: options);
+  }
+
+  /// Submits an arbitrary file and streams job status updates (CUPS-only).
+  ///
+  /// See [printFile] for the MIME auto-detection behavior and the image
+  /// rendering caveat.
+  Stream<PrintJob> printFileAndStreamStatus(
+    String printerName,
+    String filePath, {
+    String docName = 'Flutter Document',
+    int? priority,
+    List<PrintOption> options = const [],
+    Duration pollInterval = const Duration(seconds: 2),
+  }) {
+    if (Platform.isWindows) {
+      throw PrintingFfiException('printFileAndStreamStatus is not supported on Windows.');
+    }
+    if (_isCups && priority != null && (priority < 1 || priority > 100)) {
+      throw PrintingFfiException('Priority must be between 1 and 100');
+    }
+    return _streamJobStatus(
+      printerName: printerName,
+      pollInterval: pollInterval,
+      submitJob: () {
+        final optionsMap = buildOptions(options);
+        optionsMap.remove('alignment');
+        if (_isCups && priority != null) {
+          optionsMap['job-priority'] = priority.toString();
+        }
+        return _sendFileJobRequest(printerName, filePath, docName: docName, options: optionsMap);
       },
     );
   }
@@ -1027,6 +1345,23 @@ class PrintingFfi {
     return completer.future;
   }
 
+  Future<int> _sendFileJobRequest(
+    String printerName,
+    String filePath, {
+    String docName = 'Flutter Document',
+    Map<String, String> options = const {},
+  }) async {
+    final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
+    final int requestId = _nextSubmitFileJobRequestId++;
+    final request = kDebugMode
+        ? SubmitFileJobRequest(requestId, printerName, filePath, docName, options)
+        : _SubmitFileJobRequest(requestId, printerName, filePath, docName, options);
+    final completer = Completer<int>();
+    _submitFileJobRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    return completer.future;
+  }
+
   int _nextPrintRequestId = 0;
   int _nextPrintJobsRequestId = 0;
   int _nextPrintJobActionRequestId = 0;
@@ -1036,6 +1371,7 @@ class PrintingFfi {
   int _nextOpenPrinterPropertiesRequestId = 0;
   int _nextSubmitRawDataJobRequestId = 0;
   int _nextSubmitPdfJobRequestId = 0;
+  int _nextSubmitFileJobRequestId = 0;
   int _nextPrintFileWithDialogRequestId = 0;
   int _nextCupsPrinterControlRequestId = 0;
   int _nextCupsJobControlRequestId = 0;
@@ -1050,6 +1386,7 @@ class PrintingFfi {
   final Map<int, Completer<PrinterPropertiesResult>> _openPrinterPropertiesRequests = <int, Completer<PrinterPropertiesResult>>{};
   final Map<int, Completer<int>> _submitRawDataJobRequests = <int, Completer<int>>{};
   final Map<int, Completer<int>> _submitPdfJobRequests = <int, Completer<int>>{};
+  final Map<int, Completer<int>> _submitFileJobRequests = <int, Completer<int>>{};
   final Map<int, Completer<bool>> _printPdfWithDialogRequests = <int, Completer<bool>>{};
   final Map<int, Completer<bool>> _cupsPrinterControlRequests = <int, Completer<bool>>{};
   final Map<int, Completer<bool>> _cupsJobControlRequests = <int, Completer<bool>>{};
@@ -1069,6 +1406,7 @@ class PrintingFfi {
       ..._openPrinterPropertiesRequests.values,
       ..._submitRawDataJobRequests.values,
       ..._submitPdfJobRequests.values,
+      ..._submitFileJobRequests.values,
       ..._printPdfWithDialogRequests.values,
       ..._cupsPrinterControlRequests.values,
       ..._cupsJobControlRequests.values,
@@ -1091,6 +1429,7 @@ class PrintingFfi {
     _openPrinterPropertiesRequests.clear();
     _submitRawDataJobRequests.clear();
     _submitPdfJobRequests.clear();
+    _submitFileJobRequests.clear();
     _printPdfWithDialogRequests.clear();
     _cupsPrinterControlRequests.clear();
     _cupsJobControlRequests.clear();
@@ -1214,6 +1553,8 @@ class PrintingFfi {
         _submitRawDataJobRequests.remove(data.id)!.complete(data.jobId);
       } else if (_submitPdfJobRequests.containsKey(data.id)) {
         _submitPdfJobRequests.remove(data.id)!.complete(data.jobId);
+      } else if (_submitFileJobRequests.containsKey(data.id)) {
+        _submitFileJobRequests.remove(data.id)!.complete(data.jobId);
       }
       return;
     }
@@ -1262,6 +1603,7 @@ class PrintingFfi {
         _openPrinterPropertiesRequests,
         _submitRawDataJobRequests,
         _submitPdfJobRequests,
+        _submitFileJobRequests,
         _printPdfWithDialogRequests,
         _cupsPrinterControlRequests,
         _cupsJobControlRequests,
@@ -1367,6 +1709,16 @@ class _SubmitPdfJobRequest {
   final String alignment;
 
   const _SubmitPdfJobRequest(this.id, this.printerName, this.pdfFilePath, this.docName, this.options, this.scalingMode, this.copies, this.pageRange, this.alignment);
+}
+
+class _SubmitFileJobRequest {
+  final int id;
+  final String printerName;
+  final String filePath;
+  final String docName;
+  final Map<String, String>? options;
+
+  const _SubmitFileJobRequest(this.id, this.printerName, this.filePath, this.docName, this.options);
 }
 
 class _PrintFileWithDialogRequest {
@@ -1552,6 +1904,7 @@ void _helperIsolateEntryPoint(SendPort sendPort) {
           return DynamicLibrary.open('${PrintingFfi._libName}.framework/${PrintingFfi._libName}');
         }
         if (Platform.isLinux) return DynamicLibrary.open('lib${PrintingFfi._libName}.so');
+        if (Platform.isAndroid) return DynamicLibrary.open('lib${PrintingFfi._libName}.so');
         if (Platform.isWindows) return DynamicLibrary.open('${PrintingFfi._libName}.dll');
         throw UnsupportedError('Unknown platform: ${Platform.operatingSystem}');
       }();
@@ -1999,6 +2352,62 @@ void _helperIsolateEntryPoint(SendPort sendPort) {
           } catch (e, s) {
             sendPort.send(_ErrorResponse(data.id, e, s));
           }
+        } else if (data is _SubmitFileJobRequest) {
+          try {
+            final namePtr = data.printerName.toNativeUtf8();
+            final pathPtr = data.filePath.toNativeUtf8();
+            final docNamePtr = data.docName.toNativeUtf8();
+            try {
+              final options = {...?data.options};
+              _remapCupsOptions(options);
+              final int numOptions = options.length;
+              Pointer<Pointer<Utf8>> keysPtr = nullptr;
+              Pointer<Pointer<Utf8>> valuesPtr = nullptr;
+
+              try {
+                if (numOptions > 0) {
+                  keysPtr = malloc<Pointer<Utf8>>(numOptions);
+                  valuesPtr = malloc<Pointer<Utf8>>(numOptions);
+                  int i = 0;
+                  for (var entry in options.entries) {
+                    keysPtr[i] = entry.key.toNativeUtf8();
+                    valuesPtr[i] = entry.value.toNativeUtf8();
+                    i++;
+                  }
+                }
+
+                final int jobId = bindings.submit_file_job(
+                  namePtr.cast(),
+                  pathPtr.cast(),
+                  docNamePtr.cast(),
+                  numOptions,
+                  keysPtr.cast(),
+                  valuesPtr.cast(),
+                );
+                if (jobId > 0) {
+                  sendPort.send(_SubmitJobResponse(data.id, jobId));
+                } else {
+                  final errorMsg = getLastError().toDartString();
+                  sendPort.send(_ErrorResponse(data.id, PrintingFfiException(errorMsg), StackTrace.current));
+                }
+              } finally {
+                if (numOptions > 0) {
+                  for (var i = 0; i < numOptions; i++) {
+                    malloc.free(keysPtr[i]);
+                    malloc.free(valuesPtr[i]);
+                  }
+                  malloc.free(keysPtr);
+                  malloc.free(valuesPtr);
+                }
+              }
+            } finally {
+              malloc.free(namePtr);
+              malloc.free(pathPtr);
+              malloc.free(docNamePtr);
+            }
+          } catch (e, s) {
+            sendPort.send(_ErrorResponse(data.id, e, s));
+          }
         } else if (data is _PrintFileWithDialogRequest) {
           try {
             final pathPtr = data.filePath.toNativeUtf8().cast<Char>();
@@ -2316,6 +2725,11 @@ class SubmitRawDataJobRequest extends _SubmitRawDataJobRequest {
 @visibleForTesting
 class SubmitPdfJobRequest extends _SubmitPdfJobRequest {
   const SubmitPdfJobRequest(super.id, super.printerName, super.pdfFilePath, super.docName, super.options, super.scalingMode, super.copies, super.pageRange, super.alignment);
+}
+
+@visibleForTesting
+class SubmitFileJobRequest extends _SubmitFileJobRequest {
+  const SubmitFileJobRequest(super.id, super.printerName, super.filePath, super.docName, super.options);
 }
 
 @visibleForTesting

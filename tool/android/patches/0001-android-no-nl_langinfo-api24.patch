@@ -1,0 +1,25 @@
+Android/bionic: nl_langinfo(CODESET) is __INTRODUCED_IN(26), so at API 24 the
+declaration in <langinfo.h> is hidden but the CODESET macro is still defined.
+CUPS guards the nl_langinfo call with `#ifdef CODESET`, which is therefore true
+even though the function isn't available, causing an implicit-declaration error.
+
+Fix: on Android below API 26, undefine CODESET right after the include so the
+nl_langinfo path compiles out. CUPS already falls back to UTF-8 when no charset
+is detected, which is the correct default for Android anyway. Minimal, scoped to
+__ANDROID_API__ < 26.
+
+--- a/cups/language.c
++++ b/cups/language.c
+@@ -17,6 +17,12 @@
+ #include "debug-internal.h"
+ #ifdef HAVE_LANGINFO_H
+ #  include <langinfo.h>
++/* Android/bionic: nl_langinfo() is only available at API >= 26, but CODESET is
++ * defined regardless. Undefine it on older API levels so the nl_langinfo() call
++ * below compiles out and CUPS falls back to its UTF-8 default. */
++#  if defined(__ANDROID__) && defined(__ANDROID_API__) && __ANDROID_API__ < 26
++#    undef CODESET
++#  endif
+ #endif /* HAVE_LANGINFO_H */
+ #ifdef _WIN32
+ #  include <io.h>

@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 
 import 'package:printing_ffi/printing_ffi.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
+import 'cups_android_boot.dart';
+import 'dnp_usb.dart';
 import 'widgets.dart';
 
 /// A local helper class to represent the custom scaling option in the UI.
@@ -86,6 +88,14 @@ void main() {
   // you might not need this call, but it's safe to leave it in as this plugin's
   // initialization is guarded against being run more than once.
   PrintingFfi.instance.initPdfium();
+  // Phase 1: on Android, boot the bundled cupsd inside the app sandbox and probe
+  // get_printers against it. Fire-and-forget; updates CupsAndroidBoot.status.
+  if (Platform.isAndroid) {
+    // Run after the first frame so the MethodChannel is ready.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      CupsAndroidBoot.bootAndProbe();
+    });
+  }
   runApp(const PrintingFfiExampleApp());
 }
 
@@ -181,6 +191,11 @@ class _PrintingScreenState extends State<PrintingScreen> {
   bool _isLoadingWindowsCaps = false;
   RawDataType _selectedRawDataType = RawDataType.zpl;
 
+  // Android CUPS/DNP banners are collapsed by default so they don't dominate the
+  // top of the screen. Tap a header to expand.
+  bool _cupsBannerExpanded = false;
+  bool _dnpBannerExpanded = false;
+
   late final TextEditingController _rawDataController;
   Object _selectedScaling = PdfPrintScaling.fitToPrintableArea;
   final TextEditingController _customScaleController = TextEditingController(
@@ -190,6 +205,11 @@ class _PrintingScreenState extends State<PrintingScreen> {
     text: '1',
   );
   final TextEditingController _pageRangeController = TextEditingController();
+  // Android bundled-cupsd test: the device URI to add as a raw queue. Defaults to
+  // a dev-Mac fake printer (tool/android/fake-printer.sh). Edit to your host:9100.
+  final TextEditingController _cupsUriController = TextEditingController(
+    text: 'socket://192.168.2.165:9100',
+  );
   String? _selectedPdfPath;
 
   ///int _tabIndex = 0;
@@ -210,6 +230,7 @@ class _PrintingScreenState extends State<PrintingScreen> {
     _copiesController.dispose();
     _pageRangeController.dispose();
     _customScaleController.dispose();
+    _cupsUriController.dispose();
     super.dispose();
   }
 
@@ -496,6 +517,90 @@ class _PrintingScreenState extends State<PrintingScreen> {
     }
   }
 
+  /// Picks an image file and submits it to the selected printer via the new
+  /// generic file-submit path (CUPS auto-detects the MIME type). This is the
+  /// precursor to DNP dye-sub photo printing.
+  ///
+  /// NOTE: real image rendering (image -> printer raster) needs the
+  /// cups-filters / Gutenprint image filters, which are NOT bundled yet. On a
+  /// raw queue the image is sent unfiltered — the point here is that the submit
+  /// path works and CUPS accepts the job.
+  Future<void> _pickAndPrintImage() async {
+    if (_selectedPrinter == null) {
+      _showToast('No printer selected!', isError: true);
+      return;
+    }
+
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+    );
+    if (result == null || result.files.single.path == null) {
+      return;
+    }
+    final path = result.files.single.path!;
+    final fileName = result.files.single.name;
+
+    if (!mounted) return;
+    try {
+      _showToast('Submitting image "$fileName"...');
+      final jobId = await PrintingFfi.instance.printImage(
+        printerName: _selectedPrinter!.name,
+        imagePath: path,
+        docName: fileName,
+      );
+      if (!mounted) return;
+      if (jobId > 0) {
+        _showToast('Image submitted (job $jobId). Note: raw queues send it unfiltered.');
+      } else {
+        _showToast('Image submit returned no job id.', isError: true);
+      }
+    } on PrintingFfiException catch (e) {
+      _showToast('Failed to submit image: ${e.message}', isError: true);
+    } catch (e) {
+      _showToast('Unexpected error submitting image: $e', isError: true);
+    }
+  }
+
+  /// Picks an image and prints it to the given auto-detected DNP queue. Wraps the
+  /// submit in a foreground service so Android keeps the app (cupsd + fd-server +
+  /// USB connection) alive across the multi-second dye-sub job.
+  Future<void> _printImageToDnp(DnpUsbPrinter dnp) async {
+    if (!dnp.ready) {
+      _showToast('DNP queue not ready yet.', isError: true);
+      return;
+    }
+    final result = await FilePicker.platform.pickFiles(type: FileType.image);
+    if (result == null || result.files.single.path == null) return;
+    final path = result.files.single.path!;
+    final fileName = result.files.single.name;
+    if (!mounted) return;
+
+    await DnpUsb.instance.beginForegroundJob(text: 'Printing "$fileName" to ${dnp.modelName}');
+    try {
+      _showToast('Submitting "$fileName" to ${dnp.queueName}...');
+      final jobId = await PrintingFfi.instance.printImage(
+        printerName: dnp.queueName,
+        imagePath: path,
+        docName: fileName,
+      );
+      if (!mounted) return;
+      if (jobId > 0) {
+        _showToast('Image submitted to DNP (job $jobId).');
+      } else {
+        _showToast('DNP image submit returned no job id.', isError: true);
+      }
+    } on PrintingFfiException catch (e) {
+      _showToast('Failed to print to DNP: ${e.message}', isError: true);
+    } catch (e) {
+      _showToast('Unexpected error printing to DNP: $e', isError: true);
+    } finally {
+      // Give the backend a moment to pick up the job before dropping the FGS.
+      // (A production app would keep the FGS up until the job leaves the queue.)
+      await Future<void>.delayed(const Duration(seconds: 2));
+      await DnpUsb.instance.endForegroundJob();
+    }
+  }
+
   Future<void> _printPdfAndTrack() async {
     if (_selectedPrinter == null) {
       _showToast('No printer selected!', isError: true);
@@ -775,6 +880,14 @@ class _PrintingScreenState extends State<PrintingScreen> {
                     .toList(),
               ),
             ),
+            // Android: open the bundled cupsd admin/settings page (/admin) in the
+            // plugin's in-app WebView. One call, no app-built widget.
+            if (Platform.isAndroid)
+              IconButton(
+                icon: const Icon(Icons.settings_outlined),
+                tooltip: 'CUPS settings',
+                onPressed: () => PrintingFfi.instance.openCupsSettings(context),
+              ),
             IconButton(
               icon: const Icon(Icons.brightness_6_outlined),
               onPressed: widget.onThemeToggle,
@@ -799,6 +912,27 @@ class _PrintingScreenState extends State<PrintingScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // The Android CUPS/DNP banners can grow (DNP list, URI field,
+              // buttons). Cap them to a fraction of the screen and let them
+              // scroll internally so they never overflow or squeeze out the
+              // tabs below. Everything stays reachable.
+              if (Platform.isAndroid)
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: MediaQuery.of(context).size.height * 0.42,
+                  ),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildCupsAndroidBanner(),
+                        const SizedBox(height: 12),
+                        _buildDnpUsbBanner(),
+                      ],
+                    ),
+                  ),
+                ),
+              if (Platform.isAndroid) const SizedBox(height: 12),
               _buildPrinterSelector(),
               const SizedBox(height: 20),
               Expanded(
@@ -816,6 +950,185 @@ class _PrintingScreenState extends State<PrintingScreen> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  /// A collapsible banner card: an always-visible header (title + one-line status +
+  /// expand/collapse chevron) and a [body] shown only when expanded. Collapsed by
+  /// default so the Android banners stay compact at the top of the screen.
+  Widget _collapsibleBanner({
+    required Color color,
+    required String title,
+    required Widget statusLine,
+    required bool expanded,
+    required VoidCallback onToggle,
+    required Widget body,
+  }) {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            onTap: onToggle,
+            borderRadius: BorderRadius.circular(8),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        const SizedBox(height: 2),
+                        DefaultTextStyle.merge(
+                          style: const TextStyle(fontSize: 12),
+                          child: statusLine,
+                        ),
+                      ],
+                    ),
+                  ),
+                  Icon(expanded ? Icons.expand_less : Icons.expand_more),
+                ],
+              ),
+            ),
+          ),
+          if (expanded)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: body,
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCupsAndroidBanner() {
+    return _collapsibleBanner(
+      color: Colors.indigo,
+      title: 'Bundled CUPS (in-app cupsd)',
+      statusLine: ValueListenableBuilder<String>(
+        valueListenable: CupsAndroidBoot.status,
+        builder: (context, value, _) =>
+            Text(value, maxLines: 2, overflow: TextOverflow.ellipsis),
+      ),
+      expanded: _cupsBannerExpanded,
+      onToggle: () =>
+          setState(() => _cupsBannerExpanded = !_cupsBannerExpanded),
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            controller: _cupsUriController,
+            decoration: const InputDecoration(
+              labelText: 'Device URI (e.g. socket://<host>:9100)',
+              isDense: true,
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ElevatedButton(
+                onPressed: () async {
+                  final uri = _cupsUriController.text.trim();
+                  final ok = await CupsAndroidBoot.addTestPrinter(
+                    name: 'test',
+                    deviceUri: uri,
+                  );
+                  if (!mounted) return;
+                  _showToast(
+                    ok ? 'Added queue: $uri' : 'Add failed (see banner/logcat)',
+                    isError: !ok,
+                  );
+                  await _refreshPrinters();
+                },
+                child: const Text('Add raw socket:// queue'),
+              ),
+              OutlinedButton(
+                onPressed: () => _refreshPrinters(),
+                child: const Text('Refresh printers'),
+              ),
+              ElevatedButton.icon(
+                onPressed: _pickAndPrintImage,
+                icon: const Icon(Icons.image, size: 16),
+                label: const Text('Pick & print image'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// DNP dye-sub USB auto-detect status + detected-printer list. Plug a DNP printer
+  /// in (grant permission when prompted) and it auto-adds a CUPS queue here.
+  Widget _buildDnpUsbBanner() {
+    return _collapsibleBanner(
+      color: Colors.teal,
+      title: 'DNP dye-sub (USB auto-detect)',
+      statusLine: ValueListenableBuilder<String>(
+        valueListenable: DnpUsb.instance.status,
+        builder: (context, value, _) =>
+            Text(value, maxLines: 2, overflow: TextOverflow.ellipsis),
+      ),
+      expanded: _dnpBannerExpanded,
+      onToggle: () => setState(() => _dnpBannerExpanded = !_dnpBannerExpanded),
+      body: ValueListenableBuilder<List<DnpUsbPrinter>>(
+        valueListenable: DnpUsb.instance.printers,
+        builder: (context, list, _) {
+          if (list.isEmpty) {
+            return const Text(
+              'No DNP printer detected. Plug one in and grant USB permission.',
+              style: TextStyle(fontSize: 12, color: Colors.black54),
+            );
+          }
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (final dnp in list)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(
+                    children: [
+                      Icon(
+                        dnp.ready ? Icons.check_circle : Icons.usb,
+                        size: 18,
+                        color: dnp.ready ? Colors.green : Colors.orange,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '${dnp.modelName.isNotEmpty ? dnp.modelName : dnp.queueName}'
+                          '${dnp.serial.isNotEmpty ? ' (${dnp.serial})' : ''}'
+                          '${dnp.ready ? '' : ' — connecting…'}',
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                      ),
+                      ElevatedButton.icon(
+                        onPressed:
+                            dnp.ready ? () => _printImageToDnp(dnp) : null,
+                        icon: const Icon(Icons.print, size: 16),
+                        label: const Text('Print image'),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -871,6 +1184,12 @@ class _PrintingScreenState extends State<PrintingScreen> {
               onPressed: _printFileWithDialogAndTrack,
               child: const Text('Print File with Dialog & Track'),
             ),
+            const SizedBox(height: 8),
+            ShadButton.outline(
+              leading: const Icon(Icons.image, size: 16),
+              onPressed: _pickAndPrintImage,
+              child: const Text('Pick & print image'),
+            ),
           ],
           platformSettings: _buildPlatformSettings(),
         ),
@@ -921,6 +1240,17 @@ class _PrintingScreenState extends State<PrintingScreen> {
           setState(() => _selectedPdfRotation = r ?? PdfRotation.auto),
       onOpenProperties: () async {
         if (_selectedPrinter == null) return;
+        // Android: open the bundled cupsd web interface for this printer via the
+        // plugin's in-app settings page (the desktop openPrinterProperties is a
+        // no-op there). No app-built widget needed.
+        if (Platform.isAndroid) {
+          if (!mounted) return;
+          await PrintingFfi.instance.openCupsPrinterSettings(
+            context,
+            printerName: _selectedPrinter!.name,
+          );
+          return;
+        }
         try {
           final result = await PrintingFfi.instance.openPrinterProperties(
             _selectedPrinter!.name,
