@@ -27,6 +27,10 @@ dependencies:
   # Android/iOS; on desktop it is an inert, never-instantiated dependency (the web
   # UI helpers no-op off Android).
   webview_flutter: ^4.10.0
+  # Android only: persists seen DNP USB device signatures (vid:pid:serial) so a known,
+  # already-permitted printer is auto-opened on reattach without re-prompting. Inert
+  # off Android (the DNP auto-detect layer only runs there).
+  shared_preferences: ^2.3.2
 
 dev_dependencies:
   ffigen: ^20.0.0-dev.1

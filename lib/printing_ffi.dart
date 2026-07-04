@@ -6,11 +6,17 @@ import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
 import 'package:printing_ffi/printing_ffi_bindings_generated.dart' hide PrinterAttribute;
 import 'models/models.dart';
+import 'src/cups_android.dart';
+import 'src/dnp_usb.dart';
 
 export 'models/models.dart';
 // Android web-UI helpers: CupsWebView widget + openCupsSettings() /
 // openCupsPrinterSettings() extension on PrintingFfi (in-app cupsd settings pages).
 export 'src/cups_web_ui.dart';
+// Android DNP dye-sub USB auto-detect: the DnpUsbPrinter model surfaced via
+// PrintingFfi.dnpPrinters, plus the DnpUsb orchestration (foreground-service
+// helpers used around a print job). Owned + started by the plugin.
+export 'src/dnp_usb.dart';
 
 void _remapCupsOptions(Map<String, String> options) {
   if (Platform.isMacOS || Platform.isLinux) {
@@ -287,11 +293,58 @@ class PrintingFfi {
   }
 
   /// Android only: terminates the bundled cupsd started by [startCupsServer].
+  ///
+  /// Clears [cupsServerPort] (so the web-UI helpers report "not running") and resets
+  /// the [initializeAndroidCups] single-flight latch, so a later
+  /// [initializeAndroidCups] can boot cupsd again from a clean state.
   void stopCupsServer() {
     if (!Platform.isAndroid) return;
     _bindings.stop_cups_server();
     _cupsServerPort = null;
+    CupsAndroidBoot.instance.reset();
   }
+
+  /// Android only: boots the bundled CUPS scheduler and starts DNP USB auto-detect.
+  ///
+  /// This is the single startup call a consumer app makes to bring up the Android
+  /// port. It:
+  /// 1. asks the plugin's Kotlin side (`printing_ffi/cups` -> `getCupsPaths`) for the
+  ///    extracted asset/native-lib paths,
+  /// 2. boots the in-app cupsd via [startCupsServer] (pointing the libcups client at
+  ///    it, so [listPrinters] and friends now talk to the bundled server), and
+  /// 3. starts the DNP dye-sub USB auto-detect layer, which auto-adds a CUPS queue
+  ///    for any attached & permitted DNP printer (observe [dnpPrinters]).
+  ///
+  /// Progress is published on [cupsStatus] for an optional status banner.
+  ///
+  /// No-op off Android (safe to call unconditionally in `main`).
+  ///
+  /// Concurrency (C13): single-flight — concurrent or repeated calls dedupe onto one
+  /// in-flight boot; once a boot has completed, subsequent calls return immediately.
+  /// After [stopCupsServer] the latch is reset, so a later call re-boots cleanly.
+  ///
+  /// Threading / ANR (C14): the boot runs SYNCHRONOUS FFI (`start_cups_server`, and,
+  /// during DNP auto-add, `add_cups_printer`/`generate_cups_dnp_ppd`) pinned to the
+  /// CALLING (root/UI) isolate because libcups keeps its target CUPS server in
+  /// thread-local `cupsSetServer` state — this work CANNOT be moved to a helper
+  /// isolate without missing the in-app cupsd. `Future<void>` does not make it
+  /// non-blocking. Call this at startup (e.g. after the first frame) and expect brief
+  /// synchronous work on the UI isolate. The DNP layer deliberately defers its own
+  /// initial USB scan a beat after the app is interactive so the synchronous add flow
+  /// stays off the startup focus-acquisition window (whose starvation otherwise
+  /// caused "Waited 10000ms for FocusEvent" ANRs).
+  Future<void> initializeAndroidCups() => CupsAndroidBoot.instance.boot();
+
+  /// Human-readable status of the bundled Android cupsd boot (and its probe), for an
+  /// optional status banner. Updated by [initializeAndroidCups]. Off Android it holds
+  /// a static "Android only" string.
+  ValueNotifier<String> get cupsStatus => CupsAndroidBoot.instance.status;
+
+  /// The DNP dye-sub USB printers currently detected on Android (auto-added CUPS
+  /// queues), for an optional device list. Backed by the DNP auto-detect layer that
+  /// [initializeAndroidCups] starts; empty off Android or before any device is
+  /// plugged in + permitted.
+  ValueNotifier<List<DnpUsbPrinter>> get dnpPrinters => CupsAndroidBoot.instance.dnpPrinters;
 
   /// The localhost port the bundled Android cupsd is listening on, or `null` if it
   /// has not been started yet (or was stopped, or off Android). Set by
