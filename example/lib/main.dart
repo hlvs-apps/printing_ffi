@@ -7,8 +7,6 @@ import 'package:flutter/material.dart';
 
 import 'package:printing_ffi/printing_ffi.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
-import 'cups_android_boot.dart';
-import 'dnp_usb.dart';
 import 'widgets.dart';
 
 /// A local helper class to represent the custom scaling option in the UI.
@@ -88,14 +86,16 @@ void main() {
   // you might not need this call, but it's safe to leave it in as this plugin's
   // initialization is guarded against being run more than once.
   PrintingFfi.instance.initPdfium();
-  // Phase 1: on Android, boot the bundled cupsd inside the app sandbox and probe
-  // get_printers against it. Fire-and-forget; updates CupsAndroidBoot.status.
-  if (Platform.isAndroid) {
-    // Run after the first frame so the MethodChannel is ready.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      CupsAndroidBoot.bootAndProbe();
-    });
-  }
+  // On Android, boot the bundled cupsd inside the app sandbox and start DNP USB
+  // auto-detect — the entire Android port comes up with this ONE call (no-op off
+  // Android). Fire-and-forget; observe PrintingFfi.instance.cupsStatus /
+  // PrintingFfi.instance.dnpPrinters for progress + detected printers.
+  //
+  // Run after the first frame so the plugin's MethodChannel is ready and the
+  // synchronous cupsd-boot FFI stays off the startup focus-acquisition window.
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    PrintingFfi.instance.initializeAndroidCups();
+  });
   runApp(const PrintingFfiExampleApp());
 }
 
@@ -300,6 +300,23 @@ class _PrintingScreenState extends State<PrintingScreen> {
       setState(() {
         _isLoadingPrinters = false;
       });
+    }
+  }
+
+  /// Example-only demo helper: adds a raw `socket://` queue to the bundled Android
+  /// cupsd via the plugin's [PrintingFfi.addCupsPrinter]. Point [deviceUri] at your
+  /// dev host's fake printer (see tool/android/fake-printer.sh). Returns true on
+  /// success.
+  Future<bool> _addTestPrinter({
+    String name = 'test',
+    String deviceUri = 'socket://192.168.2.165:9100',
+  }) async {
+    if (!Platform.isAndroid) return false;
+    try {
+      PrintingFfi.instance.addCupsPrinter(name: name, deviceUri: deviceUri, model: 'raw');
+      return true;
+    } catch (e) {
+      return false;
     }
   }
 
@@ -1018,7 +1035,7 @@ class _PrintingScreenState extends State<PrintingScreen> {
       color: Colors.indigo,
       title: 'Bundled CUPS (in-app cupsd)',
       statusLine: ValueListenableBuilder<String>(
-        valueListenable: CupsAndroidBoot.status,
+        valueListenable: PrintingFfi.instance.cupsStatus,
         builder: (context, value, _) =>
             Text(value, maxLines: 2, overflow: TextOverflow.ellipsis),
       ),
@@ -1044,10 +1061,7 @@ class _PrintingScreenState extends State<PrintingScreen> {
               ElevatedButton(
                 onPressed: () async {
                   final uri = _cupsUriController.text.trim();
-                  final ok = await CupsAndroidBoot.addTestPrinter(
-                    name: 'test',
-                    deviceUri: uri,
-                  );
+                  final ok = await _addTestPrinter(deviceUri: uri);
                   if (!mounted) return;
                   _showToast(
                     ok ? 'Added queue: $uri' : 'Add failed (see banner/logcat)',
@@ -1087,7 +1101,7 @@ class _PrintingScreenState extends State<PrintingScreen> {
       expanded: _dnpBannerExpanded,
       onToggle: () => setState(() => _dnpBannerExpanded = !_dnpBannerExpanded),
       body: ValueListenableBuilder<List<DnpUsbPrinter>>(
-        valueListenable: DnpUsb.instance.printers,
+        valueListenable: PrintingFfi.instance.dnpPrinters,
         builder: (context, list, _) {
           if (list.isEmpty) {
             return const Text(
