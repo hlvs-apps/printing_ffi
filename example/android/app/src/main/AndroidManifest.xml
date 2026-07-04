@@ -1,16 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- USB host access (DNP dye-sub over USB). No runtime permission needed for
-         the UsbManager APIs themselves; USB_PERMISSION is granted per-device via
-         the system dialog. usb.host feature is required. -->
-    <uses-feature android:name="android.hardware.usb.host" android:required="true" />
-    <!-- Foreground service so Android doesn't kill the app (and cupsd + fd-server +
-         the live UsbDeviceConnection) mid dye-sub job (many seconds). -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <!-- targetSdk 34+ requires a typed FGS permission. "connectedDevice" fits a USB
-         printer job (data exchange with an attached device). -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
-    <!-- Notification the FGS posts (required to be visible on Android 13+). -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- NOTE: the USB host feature, the FGS <service>, and the FOREGROUND_SERVICE /
+         FOREGROUND_SERVICE_CONNECTED_DEVICE / POST_NOTIFICATIONS permissions are all
+         provided by the printing_ffi plugin's manifest and merge in automatically.
+         The only Android-side bits a consumer app adds are on the launcher <activity>
+         below: singleTop launchMode + the USB_DEVICE_ATTACHED intent-filter +
+         <meta-data> pointing at the plugin's @xml/printing_ffi_usb_device_filter. -->
     <application
         android:label="printing_ffi_example"
         android:name="${applicationName}"
@@ -45,13 +39,8 @@
             </intent-filter>
             <meta-data
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
-                android:resource="@xml/usb_device_filter" />
+                android:resource="@xml/printing_ffi_usb_device_filter" />
         </activity>
-        <!-- Foreground service kept alive across a dye-sub USB job. -->
-        <service
-            android:name=".DnpUsbForegroundService"
-            android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
