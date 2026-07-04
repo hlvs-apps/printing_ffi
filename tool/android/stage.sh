@@ -15,8 +15,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_DIR="$SCRIPT_DIR/build"
-OUT_DIR="$SCRIPT_DIR/out/arm64"
+# OUT_ROOT / STAGE_BUILD_DIR are env-overridable (C2): build-cups.sh passes the
+# same (possibly redirected) roots so a standalone run and an orchestrated run
+# stage from/to the same trees. Defaults keep standalone runs unchanged.
+OUT_ROOT="${OUT_ROOT:-$SCRIPT_DIR/out}"
+BUILD_DIR="${STAGE_BUILD_DIR:-$SCRIPT_DIR/build}"
+OUT_DIR="$OUT_ROOT/arm64"
 CUPS_VERSION="2.4.19"
 SRC_DIR="$BUILD_DIR/cups-${CUPS_VERSION}"
 CUPS_LINK="${CUPS_LINK:-static}"

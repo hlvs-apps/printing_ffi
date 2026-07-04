@@ -27,12 +27,16 @@
 set -euo pipefail
 
 # --- Paths -----------------------------------------------------------------
+# OUT_ROOT / CACHE_ROOT are env-overridable (C2); defaults keep standalone runs
+# unchanged, the orchestrator points them under ~/.gradle.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IMG_DIR="$SCRIPT_DIR/imagelibs"
+OUT_ROOT="${OUT_ROOT:-$SCRIPT_DIR/out}"
+CACHE_ROOT="${CACHE_ROOT:-$SCRIPT_DIR}"
+IMG_DIR="$CACHE_ROOT/imagelibs"
 CACHE_DIR="$IMG_DIR/cache"
 BUILD_DIR="$IMG_DIR/build"
 LOG_DIR="$IMG_DIR/logs"
-OUT_DIR="$SCRIPT_DIR/out/arm64-imagelibs"
+OUT_DIR="$OUT_ROOT/arm64-imagelibs"
 
 # --- Versions --------------------------------------------------------------
 JPEG_VERSION="3.0.4"          # libjpeg-turbo

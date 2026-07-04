@@ -20,22 +20,30 @@
 set -euo pipefail
 
 # --- Paths -----------------------------------------------------------------
+# OUT_ROOT / CACHE_ROOT are env-overridable (C2). GP_SRC holds the committed
+# source (patches, cups-config template, compat header, stage script) and always
+# resolves from the checkout; GP_DIR holds cache/build/logs + the generated shim
+# and follows CACHE_ROOT so it can live under ~/.gradle. Defaults keep standalone
+# runs unchanged.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GP_DIR="$SCRIPT_DIR/gutenprint"
+OUT_ROOT="${OUT_ROOT:-$SCRIPT_DIR/out}"
+CACHE_ROOT="${CACHE_ROOT:-$SCRIPT_DIR}"
+GP_SRC="$SCRIPT_DIR/gutenprint"
+GP_DIR="$CACHE_ROOT/gutenprint"
 CACHE_DIR="$GP_DIR/cache"
 BUILD_DIR="$GP_DIR/build"
-PATCH_DIR="$GP_DIR/patches"
+PATCH_DIR="$GP_SRC/patches"
 LOG_DIR="$GP_DIR/logs"
-OUT_DIR="$SCRIPT_DIR/out/arm64-gutenprint"
+OUT_DIR="$OUT_ROOT/arm64-gutenprint"
 
 # Staged cross CUPS (read-only): static libcups.a/libcupsimage.a + headers.
-STAGED_CUPS="$SCRIPT_DIR/out/arm64"
+STAGED_CUPS="$OUT_ROOT/arm64"
 
 # Staged cross libusb-1.0 (read-only): pkgconfig + libusb-1.0.a + headers.
 # When present, the DNP / dye-sub USB backend (`backend_gutenprint`, which holds
 # backend_dnpds40.c) is built; when absent, it is skipped (as in the original
 # feasibility pass). Auto-detected below; force off with WITH_LIBUSB=0.
-STAGED_LIBUSB="$SCRIPT_DIR/out/arm64-libusb"
+STAGED_LIBUSB="$OUT_ROOT/arm64-libusb"
 STAGED_LIBUSB_PC="$STAGED_LIBUSB/lib/pkgconfig"
 
 GP_VERSION="5.3.5"
@@ -126,8 +134,9 @@ fi
 # --- cups-config shim ------------------------------------------------------
 # Materialize the cross cups-config from its template, pointing at the staged
 # CUPS. Gutenprint's configure runs `cups-config` to learn CUPS CFLAGS/LIBS.
+mkdir -p "$GP_DIR"
 CUPS_CONFIG="$GP_DIR/cups-config-android"
-sed "s|@STAGED_CUPS@|$STAGED_CUPS|g" "$GP_DIR/cups-config-android.in" > "$CUPS_CONFIG"
+sed "s|@STAGED_CUPS@|$STAGED_CUPS|g" "$GP_SRC/cups-config-android.in" > "$CUPS_CONFIG"
 chmod +x "$CUPS_CONFIG"
 echo "==> cups-config shim: $CUPS_CONFIG"
 echo "    --cflags     : $("$CUPS_CONFIG" --cflags)"
@@ -141,7 +150,7 @@ echo "    --image --libs: $("$CUPS_CONFIG" --image --libs)"
 # dye-sub USB backend is skipped; see NOTES.md "DNP backend").
 # Force-include the Android compat shim (iconv stubs for API<28). Absolute path
 # so it works from every nested build subdir. See android-compat-gp.h.
-GP_COMPAT_H="$GP_DIR/android-compat-gp.h"
+GP_COMPAT_H="$GP_SRC/android-compat-gp.h"
 export CFLAGS="-D_GNU_SOURCE -fPIC -O2 -Wno-error -Wno-implicit-function-declaration -include $GP_COMPAT_H"
 export CPPFLAGS="-D_GNU_SOURCE -include $GP_COMPAT_H"
 # 16KB page alignment (Android 15+/Play requirement; matches build-cups.sh).
@@ -242,6 +251,6 @@ echo "==> Build finished"
 # --- stage -----------------------------------------------------------------
 echo "==> Staging outputs into $OUT_DIR"
 STAGED_CUPS="$STAGED_CUPS" OUT_DIR="$OUT_DIR" SRC_DIR="$SRC_DIR" GP_VERSION="$GP_VERSION" \
-  READELF="$READELF" "$GP_DIR/stage-gutenprint.sh"
+  READELF="$READELF" "$GP_SRC/stage-gutenprint.sh"
 
 echo "==> DONE"

@@ -42,18 +42,25 @@
 set -euo pipefail
 
 # --- Paths -----------------------------------------------------------------
+# OUT_ROOT / CACHE_ROOT are env-overridable (C2); the cross-references to the
+# already-staged CUPS + image libs also follow OUT_ROOT so the orchestrator's
+# out-of-checkout tree resolves. Defaults keep standalone runs unchanged.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CF_DIR="$SCRIPT_DIR/cupsfilters"
+OUT_ROOT="${OUT_ROOT:-$SCRIPT_DIR/out}"
+CACHE_ROOT="${CACHE_ROOT:-$SCRIPT_DIR}"
+CF_DIR="$CACHE_ROOT/cupsfilters"
 CACHE_DIR="$CF_DIR/cache"
 BUILD_DIR="$CF_DIR/build"
-PATCH_DIR="$CF_DIR/patches"
+# Patches are source (committed): always resolve them from the checkout, even
+# when CACHE_ROOT points the build tree elsewhere.
+PATCH_DIR="$SCRIPT_DIR/cupsfilters/patches"
 LOG_DIR="$CF_DIR/logs"
-OUT_DIR="$SCRIPT_DIR/out/arm64-cupsfilters"
+OUT_DIR="$OUT_ROOT/arm64-cupsfilters"
 
 # Staged cross CUPS (read-only): static libcups.a/libcupsimage.a + headers.
-STAGED_CUPS="$SCRIPT_DIR/out/arm64"
+STAGED_CUPS="$OUT_ROOT/arm64"
 # Staged cross image libs (read-only): libjpeg/libpng/libtiff .a + headers + .pc.
-STAGED_IMG="$SCRIPT_DIR/out/arm64-imagelibs"
+STAGED_IMG="$OUT_ROOT/arm64-imagelibs"
 
 CF_VERSION="1.28.17"
 CF_TARBALL="cups-filters-${CF_VERSION}.tar.xz"

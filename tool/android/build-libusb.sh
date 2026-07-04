@@ -30,12 +30,17 @@
 set -euo pipefail
 
 # --- Paths -----------------------------------------------------------------
+# OUT_ROOT / CACHE_ROOT are env-overridable (C2) so the orchestrator can point
+# every output + build tree OUT of the (read-only, git-dependency) plugin
+# checkout, into ~/.gradle. Defaults keep standalone runs unchanged.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LU_DIR="$SCRIPT_DIR/libusb"
+OUT_ROOT="${OUT_ROOT:-$SCRIPT_DIR/out}"
+CACHE_ROOT="${CACHE_ROOT:-$SCRIPT_DIR}"
+LU_DIR="$CACHE_ROOT/libusb"
 CACHE_DIR="$LU_DIR/cache"
 BUILD_DIR="$LU_DIR/build"
 LOG_DIR="$LU_DIR/logs"
-OUT_DIR="$SCRIPT_DIR/out/arm64-libusb"
+OUT_DIR="$OUT_ROOT/arm64-libusb"
 
 LU_VERSION="1.0.27"
 LU_TARBALL="libusb-${LU_VERSION}.tar.bz2"

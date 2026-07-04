@@ -46,10 +46,21 @@ esac
 echo "==> Link mode: CUPS_LINK=$CUPS_LINK"
 
 # --- Paths -----------------------------------------------------------------
+# OUT_ROOT / CACHE_ROOT are env-overridable (C2). CUPS's cache/build historically
+# live directly under tool/android/; when CACHE_ROOT is redirected (orchestrator)
+# they move under a dedicated cups/ subdir so the whole tree stays out of the
+# plugin checkout. Patches stay in the checkout (they are source, not output).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CACHE_DIR="$SCRIPT_DIR/cache"
-BUILD_DIR="$SCRIPT_DIR/build"
-OUT_DIR="$SCRIPT_DIR/out/arm64"
+OUT_ROOT="${OUT_ROOT:-$SCRIPT_DIR/out}"
+CACHE_ROOT="${CACHE_ROOT:-$SCRIPT_DIR}"
+if [ "$CACHE_ROOT" = "$SCRIPT_DIR" ]; then
+  CACHE_DIR="$SCRIPT_DIR/cache"
+  BUILD_DIR="$SCRIPT_DIR/build"
+else
+  CACHE_DIR="$CACHE_ROOT/cups/cache"
+  BUILD_DIR="$CACHE_ROOT/cups/build"
+fi
+OUT_DIR="$OUT_ROOT/arm64"
 PATCH_DIR="$SCRIPT_DIR/patches"
 
 CUPS_VERSION="2.4.19"
@@ -232,7 +243,10 @@ make -j"$JOBS" || make    # fall back to serial on parallel race
 echo "==> Build finished"
 
 # --- stage -----------------------------------------------------------------
+# stage.sh reads the built tree from $BUILD_DIR and writes to $OUT_ROOT/arm64.
+# Pass both through so it stays consistent with the (possibly redirected) roots.
 echo "==> Staging outputs into $OUT_DIR"
-CUPS_LINK="$CUPS_LINK" "$SCRIPT_DIR/stage.sh"
+CUPS_LINK="$CUPS_LINK" OUT_ROOT="$OUT_ROOT" STAGE_BUILD_DIR="$BUILD_DIR" \
+  "$SCRIPT_DIR/stage.sh"
 
 echo "==> DONE"
