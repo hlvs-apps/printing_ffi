@@ -108,3 +108,30 @@ android {
         main.assets.srcDirs  += cupsAssets
     }
 }
+
+// ---------------------------------------------------------------------------
+// C4 — assets ordering (the "untested delta" the plan flagged as the top risk).
+//
+// build_cups_android.sh runs from CMake configure (configureCMake<Variant>) and
+// GENERATES the DATA assets into ${cupsAssets}. The jniLibs merge tasks re-scan
+// their source dirs at EXECUTION time and pick up the generated .so fine (proven
+// by gphoto). But merge<Variant>Assets reads its source-set dirs and, on a COLD
+// build where ${cupsAssets} does not yet exist when the task runs, silently ships
+// NOTHING under assets/cups + assets/gutenprint (the web UI + PPDs would 404 at
+// runtime). Verified: a cold `flutter build apk` packaged 0 asset files without
+// this wiring.
+//
+// Fix: make the asset (and jniLib, for symmetry/safety) merge tasks depend on the
+// CMake configure task for the same variant+ABI, so the orchestrator has created
+// ${cupsAssets} before the merge scans it. configureCMake* is where our
+// execute_process(build_cups_android.sh) runs, so this is the earliest AGP task
+// that guarantees the generated tree exists on disk.
+// ---------------------------------------------------------------------------
+afterEvaluate {
+    tasks.matching { it.name ==~ /merge.*Assets/ || it.name ==~ /merge.*JniLibFolders/ }.configureEach { mergeTask ->
+        def variant = (mergeTask.name =~ /^merge(.*?)(Assets|JniLibFolders)$/)[0][1]
+        tasks.matching { it.name ==~ /configureCMake${variant}(\[.*])?/ }.each { cmakeTask ->
+            mergeTask.dependsOn(cmakeTask)
+        }
+    }
+}
