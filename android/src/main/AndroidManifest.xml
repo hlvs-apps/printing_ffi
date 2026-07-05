@@ -27,7 +27,25 @@
       consumer app ALSO needs packaging { jniLibs { useLegacyPackaging = true } } in
       its gradle (AGP default is false, which mmaps libs and leaves nothing to exec).
     -->
-    <application android:extractNativeLibs="true">
+    <!--
+      networkSecurityConfig: the bundled cupsd web UI (opened by openCupsSettings /
+      openCupsPrinterSettings in an in-app WebView) is served over cleartext
+      http://127.0.0.1:<port>. Target SDK 28+ blocks cleartext by default, and
+      older Android System WebView builds block cleartext to loopback too — the
+      cause of net::ERR_CLEARTEXT_NOT_PERMITTED when the CUPS settings pages fail
+      to open on older devices. @xml/printing_ffi_network_security_config permits
+      cleartext to loopback ONLY (127.0.0.1 / localhost), leaving the rest of the
+      host app's traffic locked down.
+
+      MERGE CAVEAT (like extractNativeLibs below): a consumer app that already sets
+      its own android:networkSecurityConfig hits a manifest-merge conflict and must
+      either add tools:replace="android:networkSecurityConfig" (and fold a
+      <domain-config cleartextTrafficPermitted="true"> for 127.0.0.1/localhost into
+      its own config so the CUPS WebView keeps working) or reference this file.
+    -->
+    <application
+        android:extractNativeLibs="true"
+        android:networkSecurityConfig="@xml/printing_ffi_network_security_config">
         <!-- Foreground service kept alive across a dye-sub USB job. The name is
              package-relative (.DnpUsbForegroundService resolves to
              com.example.printing_ffi.DnpUsbForegroundService, this module's package). -->

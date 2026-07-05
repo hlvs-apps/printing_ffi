@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The bundled cupsd serves its web UI over cleartext http://127.0.0.1:<port> (a
+  loopback address; there is nothing to encrypt to yourself, and cupsd has no TLS
+  cert for a random localhost port). Since target SDK 28+ cleartext is OFF by
+  default, and — the reason CUPS settings pages fail with
+  net::ERR_CLEARTEXT_NOT_PERMITTED on OLDER devices specifically — older Android
+  System WebView (Chromium) builds do NOT exempt http://127.0.0.1 from the
+  cleartext policy the way newer WebView builds do. So the WebView must be told
+  loopback cleartext is allowed.
+
+  Scope the exception to loopback ONLY so the rest of the host app keeps cleartext
+  disabled (no blanket android:usesCleartextTraffic="true"). Referenced from this
+  plugin's AndroidManifest <application android:networkSecurityConfig=...>, which
+  merges into the consumer app automatically. Requires API 24+ (this plugin's
+  minSdk); on API 24+ the loopback exemption fully covers the supported range.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>
