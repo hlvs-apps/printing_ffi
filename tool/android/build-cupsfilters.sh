@@ -67,6 +67,12 @@ CF_TARBALL="cups-filters-${CF_VERSION}.tar.xz"
 CF_URL="https://github.com/OpenPrinting/cups-filters/releases/download/${CF_VERSION}/${CF_TARBALL}"
 SRC_DIR="$BUILD_DIR/cups-filters-${CF_VERSION}"
 
+# Force-include compat shim. The orchestrator exports a STABLE copy under
+# ~/.gradle so the absolute -include path baked into the cached build tree
+# (Makefile + automake .deps) survives worktree / pub-cache changes; standalone
+# runs fall back to the checkout copy. See the heal check below.
+ANDROID_COMPAT_H="${ANDROID_COMPAT_H:-$SCRIPT_DIR/android-compat.h}"
+
 # --- Android NDK toolchain (same recipe as build-cups.sh) ------------------
 export NDK="${NDK:-/Users/henrisauer/Library/Android/sdk/ndk/27.0.12077973}"
 source "$SCRIPT_DIR/_android-toolchain.sh"   # sets TOOLCHAIN + JOBS (portable host tag)
@@ -112,6 +118,20 @@ else
   echo "==> Tarball already cached: $CACHE_DIR/$CF_TARBALL"
 fi
 
+# --- heal a poisoned cache -------------------------------------------------
+# The compat shim's absolute path is baked into this tree's Makefile AND its
+# automake .deps/*.Plo (which list it as an object prerequisite). If the tree was
+# configured against a DIFFERENT compat path — a previous checkout since deleted
+# (new commit / worktree) — make dies at parse time with "No rule to make target
+# android-compat.h". Re-extract from scratch whenever the recorded compat path
+# differs from the one now in effect; a matching stamp keeps the cached path.
+COMPAT_STAMP="$SRC_DIR/.compat-path"
+if [ -d "$SRC_DIR" ] && [ -f "$SRC_DIR/Makefile" ] \
+   && [ "$(cat "$COMPAT_STAMP" 2>/dev/null)" != "$ANDROID_COMPAT_H" ]; then
+  echo "==> compat-shim path changed (cache built against a different/removed checkout); re-extracting"
+  rm -rf "$SRC_DIR"
+fi
+
 # --- extract ---------------------------------------------------------------
 if [ ! -d "$SRC_DIR" ]; then
   echo "==> Extracting $CF_TARBALL"
@@ -154,7 +174,7 @@ echo "    --image --libs: $("$CUPS_CONFIG" --image --libs)"
 # ~/.zshrc leaks x86_64 Homebrew CPPFLAGS/LDFLAGS/PKG_CONFIG_PATH. OVERRIDE them.
 # Force-include the CUPS android compat shim (crypt/pwent stubs) — cups-filters
 # pulls in <cups/*.h> the same way. -D_GNU_SOURCE for getline etc.
-ANDROID_COMPAT_H="$SCRIPT_DIR/android-compat.h"
+# ANDROID_COMPAT_H is resolved (+ heal-checked) above.
 export CFLAGS="-D_GNU_SOURCE -fPIC -O2 -Wno-error -Wno-implicit-function-declaration -include $ANDROID_COMPAT_H -I$STAGED_IMG/include"
 export CXXFLAGS="$CFLAGS"
 export CPPFLAGS="-D_GNU_SOURCE -include $ANDROID_COMPAT_H -I$STAGED_IMG/include"
@@ -246,6 +266,8 @@ if [ ! -f "$SRC_DIR/Makefile" ] || [ "${1:-}" = "clean" ] || [ "${RECONFIGURE:-0
 else
   echo "==> Already configured (Makefile present); skipping (RECONFIGURE=1 to force)"
 fi
+# Record the compat-shim path this tree is configured against (see heal check).
+printf '%s' "$ANDROID_COMPAT_H" > "$COMPAT_STAMP"
 
 # --- prove NO PDF renderer was enabled by configure ------------------------
 echo ""

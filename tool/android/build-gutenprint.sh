@@ -51,6 +51,12 @@ GP_TARBALL="gutenprint-${GP_VERSION}.tar.xz"
 GP_URL="https://downloads.sourceforge.net/project/gimp-print/gutenprint-5.3/${GP_VERSION}/${GP_TARBALL}"
 SRC_DIR="$BUILD_DIR/gutenprint-${GP_VERSION}"
 
+# Force-include compat shim. The orchestrator exports a STABLE copy under
+# ~/.gradle so the absolute -include path baked into the cached build tree
+# (Makefile + automake .deps) survives worktree / pub-cache changes; standalone
+# runs fall back to the checkout copy. See the heal check below.
+GP_COMPAT_H="${GP_COMPAT_H:-$GP_SRC/android-compat-gp.h}"
+
 # --- Android NDK toolchain (same recipe as build-cups.sh) ------------------
 export NDK="${NDK:-/Users/henrisauer/Library/Android/sdk/ndk/27.0.12077973}"
 source "$SCRIPT_DIR/_android-toolchain.sh"   # sets TOOLCHAIN + JOBS (portable host tag)
@@ -95,6 +101,20 @@ if [ ! -f "$CACHE_DIR/$GP_TARBALL" ]; then
   curl -L --fail -o "$CACHE_DIR/$GP_TARBALL" "$GP_URL"
 else
   echo "==> Tarball already cached: $CACHE_DIR/$GP_TARBALL"
+fi
+
+# --- heal a poisoned cache -------------------------------------------------
+# The compat shim's absolute path is baked into this tree's Makefile AND its
+# automake .deps (which list it as an object prerequisite). If the tree was
+# configured against a DIFFERENT compat path — a previous checkout since deleted
+# (new commit / worktree) — make dies with "No rule to make target
+# android-compat-gp.h". Re-extract from scratch whenever the recorded compat path
+# differs from the one now in effect; a matching stamp keeps the cached path.
+COMPAT_STAMP="$SRC_DIR/.compat-path"
+if [ -d "$SRC_DIR" ] && [ -f "$SRC_DIR/Makefile" ] \
+   && [ "$(cat "$COMPAT_STAMP" 2>/dev/null)" != "$GP_COMPAT_H" ]; then
+  echo "==> compat-shim path changed (cache built against a different/removed checkout); re-extracting"
+  rm -rf "$SRC_DIR"
 fi
 
 # --- extract ---------------------------------------------------------------
@@ -150,7 +170,7 @@ echo "    --image --libs: $("$CUPS_CONFIG" --image --libs)"
 # dye-sub USB backend is skipped; see NOTES.md "DNP backend").
 # Force-include the Android compat shim (iconv stubs for API<28). Absolute path
 # so it works from every nested build subdir. See android-compat-gp.h.
-GP_COMPAT_H="$GP_SRC/android-compat-gp.h"
+# GP_COMPAT_H is resolved (+ heal-checked) above.
 export CFLAGS="-D_GNU_SOURCE -fPIC -O2 -Wno-error -Wno-implicit-function-declaration -include $GP_COMPAT_H"
 export CPPFLAGS="-D_GNU_SOURCE -include $GP_COMPAT_H"
 # 16KB page alignment (Android 15+/Play requirement; matches build-cups.sh).
@@ -240,6 +260,8 @@ if [ ! -f "$SRC_DIR/Makefile" ] || [ "${1:-}" = "clean" ] || [ "${RECONFIGURE:-0
 else
   echo "==> Already configured (Makefile present); skipping configure (RECONFIGURE=1 to force)"
 fi
+# Record the compat-shim path this tree is configured against (see heal check).
+printf '%s' "$GP_COMPAT_H" > "$COMPAT_STAMP"
 
 # --- build -----------------------------------------------------------------
 echo "==> Building Gutenprint"

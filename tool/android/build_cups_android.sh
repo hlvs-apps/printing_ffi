@@ -118,6 +118,34 @@ mkdir -p "$OUT_ROOT" "$CACHE_ROOT" "$STAGE_DIR/lib" "$STAGE_DIR/include" \
 export OUT_ROOT CACHE_ROOT
 export API="$MIN_SDK" MIN_SDK NDK
 
+# --- stable compat-shim copies (absolute -include path must NOT dangle) ------
+# The build-*.sh scripts force-include android-compat.h / android-compat-gp.h by
+# ABSOLUTE path, and autotools bakes that path into the cached build trees
+# (Makefiles, Makedefs, config.status, libtool, automake .deps/*.Po). SCRIPT_DIR
+# here is the plugin CHECKOUT — a pub-cache git dir keyed by commit
+# (~/.pub-cache/git/printing_ffi-<sha>/) or a Conductor worktree. Both are
+# replaced wholesale on a new commit / new worktree, and the old one is deleted.
+# The cache (under ~/.gradle) survives, so its baked -include path then points at
+# a vanished dir and every later `make` dies with:
+#   "No rule to make target '.../tool/android/android-compat.h'".
+# Fix: copy the shims into the persistent cache (shared + stable across checkouts)
+# and point the sub-builds at THOSE copies. Content-aware copy so an unchanged
+# shim keeps its mtime (no spurious recompiles); a changed shim propagates and
+# make rebuilds the objects that depend on it.
+COMPAT_DIR="$CACHE_DIR/compat"
+mkdir -p "$COMPAT_DIR"
+copy_stable_compat() { # <src> <dst>
+  local src="$1" dst="$2"
+  [ -f "$src" ] || { echo "ERROR: compat shim source missing: $src" >&2; exit 1; }
+  if [ ! -f "$dst" ] || ! cmp -s "$src" "$dst"; then
+    cp -f "$src" "$dst"
+  fi
+}
+copy_stable_compat "$SCRIPT_DIR/android-compat.h"               "$COMPAT_DIR/android-compat.h"
+copy_stable_compat "$SCRIPT_DIR/gutenprint/android-compat-gp.h" "$COMPAT_DIR/android-compat-gp.h"
+export ANDROID_COMPAT_H="$COMPAT_DIR/android-compat.h"
+export GP_COMPAT_H="$COMPAT_DIR/android-compat-gp.h"
+
 # The staged CUPS static libs that CMake links.
 CUPS_OUT="$OUT_ROOT/arm64"
 CUPSFILTERS_OUT="$OUT_ROOT/arm64-cupsfilters"

@@ -63,6 +63,12 @@ fi
 OUT_DIR="$OUT_ROOT/arm64"
 PATCH_DIR="$SCRIPT_DIR/patches"
 
+# Force-include compat shim. The orchestrator (build_cups_android.sh) exports a
+# STABLE copy under ~/.gradle so the absolute -include path baked into the cached
+# build tree survives worktree / pub-cache changes; standalone runs fall back to
+# the checkout copy. See the heal check below and the orchestrator's rationale.
+ANDROID_COMPAT_H="${ANDROID_COMPAT_H:-$SCRIPT_DIR/android-compat.h}"
+
 CUPS_VERSION="2.4.19"
 CUPS_TARBALL="cups-${CUPS_VERSION}-source.tar.gz"
 CUPS_URL="https://github.com/OpenPrinting/cups/releases/download/v${CUPS_VERSION}/${CUPS_TARBALL}"
@@ -108,6 +114,20 @@ if [ ! -f "$CACHE_DIR/$CUPS_TARBALL" ]; then
   curl -L --fail -o "$CACHE_DIR/$CUPS_TARBALL" "$CUPS_URL"
 else
   echo "==> Tarball already cached: $CACHE_DIR/$CUPS_TARBALL"
+fi
+
+# --- heal a poisoned cache -------------------------------------------------
+# The compat shim's absolute path is baked into this tree's Makedefs (and
+# config.status). If the tree was configured against a DIFFERENT compat path —
+# a previous checkout that has since been deleted (new commit / worktree) — every
+# recompile fails ("No rule to make target android-compat.h"). Re-extract from
+# scratch whenever the recorded compat path differs from the one now in effect;
+# a matching stamp keeps the fast (fully cached) path.
+COMPAT_STAMP="$SRC_DIR/.compat-path"
+if [ -d "$SRC_DIR" ] && [ -f "$SRC_DIR/Makedefs" ] \
+   && [ "$(cat "$COMPAT_STAMP" 2>/dev/null)" != "$ANDROID_COMPAT_H" ]; then
+  echo "==> compat-shim path changed (cache built against a different/removed checkout); re-extracting"
+  rm -rf "$SRC_DIR"
 fi
 
 # --- extract ---------------------------------------------------------------
@@ -182,8 +202,7 @@ fi
 # (non-existent) dir so pkg-config cannot discover any host libraries.
 # Force-include the Android compat shim (crypt() + API26-gated pwent/grent
 # stubs). See android-compat.h for rationale. Absolute path so it works from the
-# nested build subdirs.
-ANDROID_COMPAT_H="$SCRIPT_DIR/android-compat.h"
+# nested build subdirs. ANDROID_COMPAT_H is resolved (+ heal-checked) above.
 export CFLAGS="-D_GNU_SOURCE -fPIC -O2 -Wno-error -include $ANDROID_COMPAT_H"
 export CPPFLAGS="-D_GNU_SOURCE -include $ANDROID_COMPAT_H"
 # 16KB page alignment: Android 15+/16KB-page devices (and Google Play) require
@@ -235,6 +254,8 @@ if [ "$NEED_CONFIGURE" = "1" ]; then
 else
   echo "==> Already configured for link mode '$CUPS_LINK' (Makedefs present); skipping configure"
 fi
+# Record the compat-shim path this tree is configured against (see heal check).
+printf '%s' "$ANDROID_COMPAT_H" > "$COMPAT_STAMP"
 
 # --- build -----------------------------------------------------------------
 echo "==> Building CUPS"
