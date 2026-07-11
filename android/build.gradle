@@ -60,8 +60,14 @@ android {
     // to bump the version in their app.
     compileSdk = 36
 
-    // NDK r27 links 16 KB-aligned by default and ships the toolchain the cross
-    // scripts expect. Pin it so consumer builds are reproducible.
+    // Pin NDK r27 so consumer builds are reproducible and the cross scripts get
+    // the toolchain they expect. NB: r27 does NOT 16 KB page-align .so by default
+    // (a bare `-shared` link still emits 0x1000 LOAD segments; the 16 KB default
+    // only arrived in r28). 16 KB alignment — required by Android 15+/Play — is
+    // guaranteed instead by the explicit `-Wl,-z,max-page-size=16384` flags in
+    // CMakeLists.txt (libprinting_ffi) and every build-*.sh LDFLAGS (the bundled
+    // CUPS stack), and enforced by the C5 gate in build_cups_android.sh. Do not
+    // drop those flags on this NDK.
     ndkVersion = "27.0.12077973"
 
     // The source-build needs CMake 3.22 (execute_process + modern generator).
