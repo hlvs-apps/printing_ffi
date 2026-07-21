@@ -1,5 +1,25 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
+
+// Effective platform for interpreting a raw status code. In a `flutter test` run this
+// respects debugDefaultTargetPlatformOverride so status parsing is deterministic
+// regardless of the host OS (e.g. the Windows CI runner); in production it uses the
+// real platform. Mirrors the _isCups/_isWindows helpers in PrintingFfi.
+bool _statusHostIsCups() {
+  if (kDebugMode && Platform.environment.containsKey('FLUTTER_TEST')) {
+    return defaultTargetPlatform == TargetPlatform.macOS || defaultTargetPlatform == TargetPlatform.linux;
+  }
+  return Platform.isMacOS || Platform.isLinux;
+}
+
+bool _statusHostIsWindows() {
+  if (kDebugMode && Platform.environment.containsKey('FLUTTER_TEST')) {
+    return defaultTargetPlatform == TargetPlatform.windows;
+  }
+  return Platform.isWindows;
+}
+
 /// Represents the status of a print job.
 ///
 /// ## Print Job Lifecycle
@@ -138,7 +158,7 @@ enum PrintJobStatus {
 
   /// Creates a [PrintJobStatus] from a raw platform-specific integer value.
   static PrintJobStatus fromRaw(int status) {
-    if (Platform.isMacOS || Platform.isLinux) {
+    if (_statusHostIsCups()) {
       // CUPS IPP Job States
       return switch (status) {
         // Map int status to PrintJobStatus enum
@@ -153,7 +173,7 @@ enum PrintJobStatus {
       };
     }
 
-    if (Platform.isWindows) {
+    if (_statusHostIsWindows()) {
       // Windows Job Status bit flags. The order of checks determines priority.
       // A job can have multiple status flags, so we check from most critical to least critical.
       // The values correspond to the JOB_STATUS_* constants in the Windows Spooler API.

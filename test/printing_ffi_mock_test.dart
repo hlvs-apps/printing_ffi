@@ -505,7 +505,13 @@ void main() {
     }
 
     group('Streaming Job Status', () {
+      // These tests inject CUPS raw status codes (5 = processing, 9 = completed) and
+      // assert the parsed PrintJobStatus, so pin the effective platform to a CUPS host
+      // — otherwise they interpret the codes as Windows bit flags on the Windows CI runner.
+      tearDown(() => debugDefaultTargetPlatformOverride = null);
+
       test('rawDataToPrinterAndStreamStatus submits job and streams status', () async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
         // Arrange
         final testData = Uint8List.fromList([1, 2, 3]);
         const jobId = 999;
@@ -576,6 +582,7 @@ void main() {
       });
 
       test('printPdfAndStreamStatus submits job and streams status', () async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
         // Arrange
         const pdfPath = '/path/to/test.pdf';
         const jobId = 1000;

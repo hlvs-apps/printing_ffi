@@ -893,7 +893,7 @@ class PrintingFfi {
           if (lastJobState != null && !terminalStates.contains(lastJobState!.status)) {
             // Create a synthetic 'printed'/'completed' job status.
             // We use the most common success state for each platform.
-            final finalRawStatus = Platform.isWindows
+            final finalRawStatus = _isWindows
                 ? 128 // JOB_STATUS_PRINTED
                 : 9; // IPP_JOB_COMPLETED
             final finalJob = PrintJob(
