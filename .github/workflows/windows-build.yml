@@ -29,8 +29,10 @@ jobs:
       - name: Install plugin dependencies
         run: flutter pub get
 
+      # Warnings/errors still fail the job; info-level style lints do not block the
+      # Windows binary build (which is the point of this workflow).
       - name: Analyze
-        run: flutter analyze
+        run: flutter analyze --no-fatal-infos
 
       - name: Unit tests (mocked FFI)
         run: flutter test

@@ -2880,7 +2880,7 @@ class PrintResponse extends _PrintResponse {
 
 @visibleForTesting
 class ErrorResponse extends _ErrorResponse {
-  ErrorResponse(int id, Object error, [StackTrace? stackTrace]) : super(id, error, stackTrace);
+  ErrorResponse(super.id, super.error, [super.stackTrace]);
 }
 
 @visibleForTesting
