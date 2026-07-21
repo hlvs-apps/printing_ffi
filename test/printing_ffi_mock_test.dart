@@ -367,7 +367,9 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     });
 
-    test('printPdf ignores priority option on Windows', () async {
+    test('printPdf forwards priority option on Windows', () async {
+      // The Windows path now honors job-priority (applied to the spooler job after
+      // StartDoc) instead of silently dropping it.
       when(() => mockSendPort.send(any())).thenAnswer((_) {});
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
 
@@ -384,7 +386,7 @@ void main() {
       final result = await future;
 
       expect(result, isTrue);
-      expect(request.options?.containsKey('job-priority'), isFalse);
+      expect(request.options?['job-priority'], '80');
       debugDefaultTargetPlatformOverride = null;
     });
 
@@ -731,6 +733,128 @@ void main() {
           printingFfi.cupsPrinterSettingsUrl('HP LaserJet/Pro'),
           'http://127.0.0.1:631/printers/HP%20LaserJet%2FPro',
         );
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // Windows feature parity: the winspool backend now implements the
+    // printer/job control + attribute-query operations that were previously
+    // CUPS-only, plus image printing. These tests assert the DART-side guards
+    // are relaxed and the correct requests are dispatched. The native winspool
+    // behavior itself is verified by the windows-build CI + manual smoke test.
+    // ---------------------------------------------------------------------
+    group('Windows feature parity', () {
+      tearDown(() => debugDefaultTargetPlatformOverride = null);
+
+      test('cupsPausePrinter is supported on Windows (dispatches pause request)', () async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        when(() => mockSendPort.send(any())).thenAnswer((_) {});
+        final future = printingFfi.cupsPausePrinter('Test Printer');
+        await Future.microtask(() {});
+        final captured = verify(() => mockSendPort.send(captureAny(that: isA<CupsPrinterControlRequest>()))).captured;
+        final request = captured.last as CupsPrinterControlRequest;
+        expect(request.action, 'pause');
+        printingFfi.handleIsolateMessageForTest(CupsPrinterControlResponse(request.id, true));
+        await expectLater(future, completion(isTrue));
+      });
+
+      test('cupsHoldJob is supported on Windows (dispatches hold request)', () async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        when(() => mockSendPort.send(any())).thenAnswer((_) {});
+        final future = printingFfi.cupsHoldJob('Test Printer', 5);
+        await Future.microtask(() {});
+        final captured = verify(() => mockSendPort.send(captureAny(that: isA<CupsJobControlRequest>()))).captured;
+        final request = captured.last as CupsJobControlRequest;
+        expect(request.action, 'hold');
+        printingFfi.handleIsolateMessageForTest(CupsJobControlResponse(request.id, true));
+        await expectLater(future, completion(isTrue));
+      });
+
+      test('cupsSetJobPriority validates the 1..100 range on Windows', () async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        await expectLater(printingFfi.cupsSetJobPriority('P', 1, 0), throwsA(isA<PrintingFfiException>()));
+        await expectLater(printingFfi.cupsSetJobPriority('P', 1, 101), throwsA(isA<PrintingFfiException>()));
+      });
+
+      test('cupsGetPrinterAttribute is supported on Windows', () async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        when(() => mockSendPort.send(any())).thenAnswer((_) {});
+        final future = printingFfi.cupsGetPrinterAttribute('P', 'queued-job-count');
+        await Future.microtask(() {});
+        final captured = verify(() => mockSendPort.send(captureAny(that: isA<CupsAttributeRequest>()))).captured;
+        final request = captured.last as CupsAttributeRequest;
+        printingFfi.handleIsolateMessageForTest(CupsAttributeResponse(request.id, null));
+        await expectLater(future, completion(isNull));
+      });
+
+      test('cupsGetAllPrinterAttributes is supported on Windows', () async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        when(() => mockSendPort.send(any())).thenAnswer((_) {});
+        final future = printingFfi.cupsGetAllPrinterAttributes('P');
+        await Future.microtask(() {});
+        final captured = verify(() => mockSendPort.send(captureAny(that: isA<CupsAllAttributesRequest>()))).captured;
+        final request = captured.last as CupsAllAttributesRequest;
+        printingFfi.handleIsolateMessageForTest(CupsAttributesResponse(request.id, const []));
+        await expectLater(future, completion(isEmpty));
+      });
+
+      test('cupsMoveJob is STILL unsupported on Windows (no winspool move)', () async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        await expectLater(
+          printingFfi.cupsMoveJob('Source', 1, 'Dest'),
+          throwsA(isA<PrintingFfiException>()),
+        );
+        verifyNever(() => mockSendPort.send(any()));
+      });
+
+      test('printImage is supported on Windows (dispatches a file job request)', () async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        when(() => mockSendPort.send(any())).thenAnswer((_) {});
+        final future = printingFfi.printImage(printerName: 'P', imagePath: '/pics/photo.png');
+        await Future.microtask(() {});
+        final captured = verify(() => mockSendPort.send(captureAny(that: isA<SubmitFileJobRequest>()))).captured;
+        final request = captured.last as SubmitFileJobRequest;
+        expect(request.filePath, '/pics/photo.png');
+        printingFfi.handleIsolateMessageForTest(SubmitJobResponse(request.id, 42));
+        await expectLater(future, completion(42));
+      });
+
+      test('printFileAndStreamStatus is STILL unsupported on Windows (blocking render)', () {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        expect(
+          () => printingFfi.printFileAndStreamStatus('P', '/x/file.pdf'),
+          throwsA(isA<PrintingFfiException>()),
+        );
+      });
+    });
+
+    // Regression guards for the JobInfo struct change (adding page-count fields must
+    // not break the existing job list on any platform).
+    group('PrintJob page counts (regression)', () {
+      test('carries page counts and defaults to -1 (backward-compatible constructor)', () {
+        final withCounts = PrintJob(1, 'Doc', 4, pagesPrinted: 3, totalPages: 10);
+        expect(withCounts.pagesPrinted, 3);
+        expect(withCounts.totalPages, 10);
+        expect(withCounts.hasPageCounts, isTrue);
+
+        // The original 3-argument constructor must still work and default to unknown.
+        final legacy = PrintJob(2, 'Old', 0);
+        expect(legacy.pagesPrinted, -1);
+        expect(legacy.totalPages, -1);
+        expect(legacy.hasPageCounts, isFalse);
+      });
+
+      test('listPrintJobs surfaces per-job page counts through to the caller', () async {
+        when(() => mockSendPort.send(any())).thenAnswer((_) {});
+        final job = PrintJob(7, 'Doc', 4, pagesPrinted: 2, totalPages: 5);
+        final future = printingFfi.listPrintJobs('Test Printer');
+        await Future.microtask(() {});
+        final captured = verify(() => mockSendPort.send(captureAny())).captured;
+        final request = captured.last as PrintJobsRequest;
+        printingFfi.handleIsolateMessageForTest(PrintJobsResponse(request.id, [job]));
+        final jobs = await future;
+        expect(jobs.single.pagesPrinted, 2);
+        expect(jobs.single.totalPages, 5);
       });
     });
   });

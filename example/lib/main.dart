@@ -534,14 +534,13 @@ class _PrintingScreenState extends State<PrintingScreen> {
     }
   }
 
-  /// Picks an image file and submits it to the selected printer via the new
-  /// generic file-submit path (CUPS auto-detects the MIME type). This is the
-  /// precursor to DNP dye-sub photo printing.
+  /// Picks an image file and prints it to the selected printer.
   ///
-  /// NOTE: real image rendering (image -> printer raster) needs the
-  /// cups-filters / Gutenprint image filters, which are NOT bundled yet. On a
-  /// raw queue the image is sent unfiltered — the point here is that the submit
-  /// path works and CUPS accepts the job.
+  /// On **Windows** the image is decoded (WIC) and rasterized to the page
+  /// (fit-to-page, centered). On **CUPS** it is submitted with the server
+  /// auto-detecting the MIME type; real raster rendering there needs the
+  /// cups-filters / Gutenprint image filters, so on a raw queue the image is sent
+  /// unfiltered.
   Future<void> _pickAndPrintImage() async {
     if (_selectedPrinter == null) {
       _showToast('No printer selected!', isError: true);
@@ -567,7 +566,11 @@ class _PrintingScreenState extends State<PrintingScreen> {
       );
       if (!mounted) return;
       if (jobId > 0) {
-        _showToast('Image submitted (job $jobId). Note: raw queues send it unfiltered.');
+        _showToast(
+          Platform.isWindows
+              ? 'Image printed (job $jobId).'
+              : 'Image submitted (job $jobId). Note: raw CUPS queues send it unfiltered.',
+        );
       } else {
         _showToast('Image submit returned no job id.', isError: true);
       }

@@ -1,0 +1,54 @@
+name: Windows build
+
+# Compiles the native Windows target (src/printing_ffi.c + WIC/GDI/PDFium) and runs
+# the Dart unit tests. This is the only place the winspool/WIC/image-printing C code is
+# actually compiled — the other platforms' CI cannot catch a Windows-only build break.
+on:
+  push:
+    branches:
+      - main
+      - more-cups-features
+      - "hlvs-apps/**"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Flutter (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - run: flutter --version
+
+      - name: Install plugin dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Unit tests (mocked FFI)
+        run: flutter test
+
+      # The important step: compiles src/printing_ffi.c for Windows, links gdi32 /
+      # ole32 / windowscodecs, and fetches + links PDFium. Catches any compile/link
+      # error in the winspool + WIC image-printing code.
+      - name: Build example (Windows, release)
+        working-directory: example
+        run: flutter build windows --release
+
+      # Upload the self-contained Release folder so it can be downloaded and run on a
+      # real Windows machine (x64). Download the artifact from the run summary page,
+      # unzip it, and run printing_ffi_example.exe.
+      - name: Upload Windows example app
+        uses: actions/upload-artifact@v4
+        with:
+          name: printing_ffi-example-windows-x64
+          path: example/build/windows/x64/runner/Release
+          if-no-files-found: error
+          retention-days: 30

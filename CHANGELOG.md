@@ -1,3 +1,17 @@
+## 0.2.0
+
+* ✨ **FEAT(windows)**: Windows feature parity. The operations that were previously CUPS-only (macOS/Linux/Android) now work on Windows too via the native spooler + WIC + GDI:
+  * **Image printing** — `printImage` / `printFile` decode a JPG/PNG/BMP/GIF/TIFF with the Windows Imaging Component and print it fit-to-page, centered (transparent PNGs are composited onto white). PDFs handed to the same path continue to route through PDFium.
+  * **Printer control** — `cupsPause/Resume/Enable/DisablePrinter` map to `SetPrinter(PRINTER_CONTROL_PAUSE/RESUME)` (enable≡resume, disable≡pause on Windows).
+  * **Job control** — `cupsHoldJob` / `cupsReleaseJob` (pause/resume the job) and `cupsSetJobPriority` (1–100, mapped to the Windows 1–99 range).
+  * **Attribute queries / print counts** — `cupsGetPrinterAttribute(s)` and `cupsGetAllPrinterAttributes` return a curated subset mapped from `PRINTER_INFO_2` (`queued-job-count`, `printer-state`, `printer-info`, `printer-location`, `printer-make-and-model`, `printer-is-accepting-jobs`, `device-uri`).
+  * **Per-job page counts** — `PrintJob.pagesPrinted` / `PrintJob.totalPages`, read from the spooler on Windows (`-1` = unknown; also `-1` on CUPS, which avoids an N+1 IPP query).
+* ⚠️ **FEAT(windows)**: `cupsAcceptJobs` / `cupsRejectJobs` are best-effort on Windows — they toggle the printer's "work offline" state. New jobs still queue but do not print; Windows cannot truly refuse a submission the way CUPS reject does.
+* 🚧 **Not supported on Windows**: `cupsMoveJob` (the spooler cannot move a queued job between printers) and `printFileAndStreamStatus` (Windows renders synchronously; poll `listPrintJobs` instead). Both throw a clear error.
+* 🐛 **FIX(windows)**: `printPdf` / `printFile` now honor a requested `priority` on Windows (applied to the spooler job) instead of silently dropping it. `cancelPrintJob` now uses `JOB_CONTROL_DELETE` (the documented call) instead of the deprecated `JOB_CONTROL_CANCEL`.
+* ♻️ **REFACTOR**: Extracted shared winspool/GDI helpers (`_win_open_printer`, `_win_set_job_command`, `_win_set_job_priority`, `compute_dest_rect`, `parse_print_alignment`) so job control and the PDF/image print paths no longer duplicate boilerplate.
+* 🧪 **TEST**: Added mocked tests for the relaxed Windows guards, priority forwarding, `cupsMoveJob`/`printFileAndStreamStatus` staying unsupported, and a regression test for the `PrintJob` page-count fields. Added a `windows-latest` GitHub Actions job that compiles the native Windows target for the first time, plus a manual smoke-test checklist (`docs/windows-smoke-test.md`).
+
 ## 0.1.0
 
 * ✨ **FEAT(android)**: Android is now a supported platform. The plugin bundles a private CUPS server (for network/office IPP printing) and DNP/Citizen dye-sub USB auto-detect, cross-compiled from source (CUPS + Gutenprint + libusb) during the app's Gradle build — no prebuilt binaries are shipped. 📱🖨️

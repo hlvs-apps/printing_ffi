@@ -31,10 +31,29 @@ A Flutter plugin for direct printer communication using native FFI (Foreign Func
 | Platform   |      Status      | Notes                                |
 | :--------- | :--------------: | :----------------------------------- |
 | 🍎 macOS   |   ✅ Supported   | Requires CUPS installation.          |
-| 🪟 Windows |   ✅ Supported   | Uses native `winspool` API.          |
+| 🪟 Windows |   ✅ Supported   | Uses native `winspool` + WIC + GDI (PDFium for PDF). Image printing, printer/job control, attribute queries, and per-job page counts all supported. See [Cross-platform feature support](#cross-platform-feature-support). |
 | 🐧 Linux   |   ✅ Supported   | Requires CUPS development libraries. |
 | 🤖 Android | ✅ Supported | Bundles a CUPS server (built from source) for IPP printing + DNP/Citizen dye-sub USB auto-detect. See [docs/android-migration-guide.md](docs/android-migration-guide.md). |
 | 📱 iOS     | ❌ Not Supported | -                                    |
+
+### Cross-platform feature support
+
+The queue/job control and attribute APIs keep their `cups*` names on every platform. On
+macOS/Linux/Android they use CUPS (IPP); on Windows they use the native spooler
+(`winspool`). Behavior is the same except where the platforms genuinely differ:
+
+| Feature | CUPS (macOS/Linux/Android) | Windows |
+| :------ | :------------------------- | :------ |
+| Image printing (`printImage` / `printFile`) | Server auto-detects format | ✅ WIC decode → GDI (fit-to-page, centered); PDFs route to PDFium |
+| `cupsPause/Resume/Enable/DisablePrinter` | ✅ | ✅ (enable≡resume, disable≡pause on Windows) |
+| `cupsHoldJob` / `cupsReleaseJob` | ✅ | ✅ (pause/resume the job) |
+| `cupsSetJobPriority` (1–100) | ✅ | ✅ (mapped to the Windows 1–99 range) |
+| `cupsAcceptJobs` / `cupsRejectJobs` | Refuses new submissions | ⚠️ Best-effort "work offline": new jobs still queue but do not print (Windows cannot truly refuse a submission) |
+| `cupsGetPrinterAttribute(s)` | Full IPP attribute set | ✅ Curated subset mapped from the spooler (`queued-job-count`, `printer-state`, `printer-info`, `printer-location`, `printer-make-and-model`, `printer-is-accepting-jobs`, `device-uri`); unmapped names return "not available" |
+| `cupsGetAllPrinterAttributes` | Every attribute the printer exposes | ✅ The fixed curated Windows subset above |
+| Per-job page counts (`PrintJob.pagesPrinted` / `.totalPages`) | `-1` (unknown; avoids an N+1 IPP query) | ✅ Real values from the spooler (`-1` when the document has no page delimiters) |
+| `cupsMoveJob` | ✅ | ❌ Not supported (the spooler cannot move a queued job between printers) |
+| `printFileAndStreamStatus` | ✅ | ❌ Not supported (Windows renders synchronously; poll `listPrintJobs` instead) |
 
 ## `printing_ffi` vs. `package:printing`
 

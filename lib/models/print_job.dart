@@ -200,8 +200,34 @@ class PrintJob {
   /// The parsed, cross-platform status.
   final PrintJobStatus status;
 
-  PrintJob(this.id, this.title, this.rawStatus) : status = PrintJobStatus.fromRaw(rawStatus);
+  /// Number of pages already printed for this job, or `-1` if unknown.
+  ///
+  /// On **Windows** this comes from the spooler (`JOB_INFO_2.PagesPrinted`). A value of
+  /// `0` means "none printed yet" — or "unknown" if [totalPages] is also unknown, since
+  /// the spooler cannot always report progress.
+  ///
+  /// On **CUPS** (macOS/Linux/Android) the job list does not include page counts without
+  /// an extra per-job query, so this is always `-1` (unknown).
+  final int pagesPrinted;
+
+  /// Total pages in this job, or `-1` if unknown.
+  ///
+  /// On **Windows** this comes from `JOB_INFO_2.TotalPages`; the spooler reports `0` when
+  /// the document has no page delimiters, which is surfaced here as `-1`. On **CUPS** this
+  /// is always `-1`.
+  final int totalPages;
+
+  PrintJob(
+    this.id,
+    this.title,
+    this.rawStatus, {
+    this.pagesPrinted = -1,
+    this.totalPages = -1,
+  }) : status = PrintJobStatus.fromRaw(rawStatus);
 
   /// A user-friendly description of the status.
   String get statusDescription => status.description;
+
+  /// Whether a meaningful [totalPages] value is available for this job.
+  bool get hasPageCounts => totalPages > 0;
 }

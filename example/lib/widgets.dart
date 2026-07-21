@@ -116,7 +116,8 @@ class JobsList extends StatelessWidget {
                   child: ListTile(
                     title: Text(job.title),
                     subtitle: Text(
-                      'ID: ${job.id} - Status: ${job.statusDescription}',
+                      'ID: ${job.id} - Status: ${job.statusDescription}'
+                      '${job.hasPageCounts ? ' - Pages: ${job.pagesPrinted < 0 ? 0 : job.pagesPrinted}/${job.totalPages}' : ''}',
                     ),
                     trailing: Wrap(
                       spacing: 0,

@@ -126,6 +126,13 @@ class PrintingFfi {
     return Platform.isMacOS || Platform.isLinux || Platform.isAndroid;
   }
 
+  /// Whether printer/job queue control and attribute queries are available on the
+  /// current platform. These were historically CUPS-only (macOS/Linux/Android) but the
+  /// Windows `winspool` backend now implements the same operations, so they work on
+  /// Windows too. (Only [cupsMoveJob] remains Windows-unsupported — the spooler cannot
+  /// move a job between printers.)
+  bool get _supportsQueueControl => _isCups || _isWindows;
+
   /// Internal constructor for creating the singleton instance.
   ///
   static final PrintingFfi instance = PrintingFfi._();
@@ -582,7 +589,7 @@ class PrintingFfi {
     int? priority,
     List<PrintOption> options = const [],
   }) async {
-    if (_isCups && priority != null && (priority < 1 || priority > 100)) {
+    if (priority != null && (priority < 1 || priority > 100)) {
       throw PrintingFfiException('Priority must be between 1 and 100');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
@@ -594,7 +601,9 @@ class PrintingFfi {
     if (scaling is PdfPrintScalingCustom) {
       finalOptions['custom-scale-factor'] = scaling.scale.toString();
     }
-    if (_isCups && priority != null) {
+    // job-priority is honored on CUPS (submit-time) and on Windows (applied to the
+    // spooler job right after StartDoc).
+    if (priority != null) {
       finalOptions['job-priority'] = priority.toString();
     }
 
@@ -719,11 +728,13 @@ class PrintingFfi {
   /// bytes unfiltered. This method establishes the submit path; rendering support
   /// arrives with the DNP/Gutenprint work.
   ///
-  /// This path is CUPS-only (macOS / Linux / Android). On Windows it is not
-  /// supported and throws.
+  /// On **CUPS** (macOS / Linux / Android) the file is handed to the server, which
+  /// auto-detects the format. On **Windows** there is no server-side rasterizer, so the
+  /// file is routed by content: a PDF prints through the built-in PDFium path, and an
+  /// image (jpg/png/bmp/gif/tiff/...) is decoded with the Windows Imaging Component and
+  /// printed to the page (fit-to-page, centered). Unsupported file types return an error.
   ///
-  /// Returns the CUPS job id (> 0) on success. Throws [PrintingFfiException] on
-  /// failure.
+  /// Returns the job id (> 0) on success. Throws [PrintingFfiException] on failure.
   Future<int> printFile(
     String printerName,
     String filePath, {
@@ -731,17 +742,16 @@ class PrintingFfi {
     int? priority,
     List<PrintOption> options = const [],
   }) async {
-    if (Platform.isWindows) {
-      throw PrintingFfiException('printFile is not supported on Windows. Use printPdf or printFileWithDialog instead.');
-    }
-    if (_isCups && priority != null && (priority < 1 || priority > 100)) {
+    if (priority != null && (priority < 1 || priority > 100)) {
       throw PrintingFfiException('Priority must be between 1 and 100');
     }
     final optionsMap = buildOptions(options);
     // Alignment/scaling are PDF-render concepts; drop anything that doesn't
     // apply to a plain file submit.
     optionsMap.remove('alignment');
-    if (_isCups && priority != null) {
+    // job-priority is honored on CUPS (submit-time) and on Windows (applied to the
+    // spooler job right after it is created).
+    if (priority != null) {
       optionsMap['job-priority'] = priority.toString();
     }
     return _sendFileJobRequest(printerName, filePath, docName: docName, options: optionsMap);
@@ -749,9 +759,10 @@ class PrintingFfi {
 
   /// Convenience wrapper around [printFile] for images.
   ///
-  /// Submits an image file (jpg/png/etc.) to the given CUPS printer. See
-  /// [printFile] for the important rendering caveat: on a raw/unfiltered queue
-  /// the image is sent as-is until image filters (Gutenprint) are available.
+  /// Submits an image file (jpg/png/etc.). On **Windows** the image is decoded and
+  /// printed to the page (fit-to-page, centered). On **CUPS** it is handed to the server;
+  /// see [printFile] for the rendering caveat (a raw/unfiltered queue sends the image
+  /// as-is until image filters are available).
   Future<int> printImage({
     required String printerName,
     required String imagePath,
@@ -774,7 +785,10 @@ class PrintingFfi {
     List<PrintOption> options = const [],
     Duration pollInterval = const Duration(seconds: 2),
   }) {
-    if (Platform.isWindows) {
+    if (_isWindows) {
+      // Windows renders synchronously and blocks until the document is fully spooled
+      // (EndDoc), so a status poller started afterward would miss the job. Use
+      // printImage / printFile / printPdf on Windows and poll listPrintJobs if needed.
       throw PrintingFfiException('printFileAndStreamStatus is not supported on Windows.');
     }
     if (_isCups && priority != null && (priority < 1 || priority > 100)) {
@@ -882,7 +896,13 @@ class PrintingFfi {
             final finalRawStatus = Platform.isWindows
                 ? 128 // JOB_STATUS_PRINTED
                 : 9; // IPP_JOB_COMPLETED
-            final finalJob = PrintJob(lastJobState!.id, lastJobState!.title, finalRawStatus);
+            final finalJob = PrintJob(
+              lastJobState!.id,
+              lastJobState!.title,
+              finalRawStatus,
+              pagesPrinted: lastJobState!.pagesPrinted,
+              totalPages: lastJobState!.totalPages,
+            );
 
             // Only add if the status is actually different.
             if (finalJob.rawStatus != lastJobState!.rawStatus) {
@@ -1061,8 +1081,8 @@ class PrintingFfi {
   /// Returns `true` if the operation succeeded, `false` otherwise.
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsPausePrinter(String printerName, {String? username, String? password}) async {
-    if (!_isCups) {
-      throw PrintingFfiException('cupsPausePrinter is only supported on macOS, Linux, and Android');
+    if (!_supportsQueueControl) {
+      throw PrintingFfiException('cupsPausePrinter is not supported on this platform');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
@@ -1084,8 +1104,8 @@ class PrintingFfi {
   /// Returns `true` if the operation succeeded, `false` otherwise.
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsResumePrinter(String printerName, {String? username, String? password}) async {
-    if (!_isCups) {
-      throw PrintingFfiException('cupsResumePrinter is only supported on macOS, Linux, and Android');
+    if (!_supportsQueueControl) {
+      throw PrintingFfiException('cupsResumePrinter is not supported on this platform');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
@@ -1109,8 +1129,8 @@ class PrintingFfi {
   /// Returns `true` if the operation succeeded, `false` otherwise.
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsEnablePrinter(String printerName, {String? username, String? password}) async {
-    if (!_isCups) {
-      throw PrintingFfiException('cupsEnablePrinter is only supported on macOS, Linux, and Android');
+    if (!_supportsQueueControl) {
+      throw PrintingFfiException('cupsEnablePrinter is not supported on this platform');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
@@ -1135,8 +1155,8 @@ class PrintingFfi {
   /// Returns `true` if the operation succeeded, `false` otherwise.
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsDisablePrinter(String printerName, {String? reason, String? username, String? password}) async {
-    if (!_isCups) {
-      throw PrintingFfiException('cupsDisablePrinter is only supported on macOS, Linux, and Android');
+    if (!_supportsQueueControl) {
+      throw PrintingFfiException('cupsDisablePrinter is not supported on this platform');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
@@ -1159,8 +1179,8 @@ class PrintingFfi {
   /// Returns `true` if the operation succeeded, `false` otherwise.
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsAcceptJobs(String printerName, {String? username, String? password}) async {
-    if (!_isCups) {
-      throw PrintingFfiException('cupsAcceptJobs is only supported on macOS, Linux, and Android');
+    if (!_supportsQueueControl) {
+      throw PrintingFfiException('cupsAcceptJobs is not supported on this platform');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
@@ -1184,8 +1204,8 @@ class PrintingFfi {
   /// Returns `true` if the operation succeeded, `false` otherwise.
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsRejectJobs(String printerName, {String? reason, String? username, String? password}) async {
-    if (!_isCups) {
-      throw PrintingFfiException('cupsRejectJobs is only supported on macOS, Linux, and Android');
+    if (!_supportsQueueControl) {
+      throw PrintingFfiException('cupsRejectJobs is not supported on this platform');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsPrinterControlRequestId++;
@@ -1209,8 +1229,8 @@ class PrintingFfi {
   /// Returns `true` if the operation succeeded, `false` otherwise.
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsHoldJob(String printerName, int jobId, {String? username, String? password}) async {
-    if (!_isCups) {
-      throw PrintingFfiException('cupsHoldJob is only supported on macOS, Linux, and Android');
+    if (!_supportsQueueControl) {
+      throw PrintingFfiException('cupsHoldJob is not supported on this platform');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsJobControlRequestId++;
@@ -1233,8 +1253,8 @@ class PrintingFfi {
   /// Returns `true` if the operation succeeded, `false` otherwise.
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsReleaseJob(String printerName, int jobId, {String? username, String? password}) async {
-    if (!_isCups) {
-      throw PrintingFfiException('cupsReleaseJob is only supported on macOS, Linux, and Android');
+    if (!_supportsQueueControl) {
+      throw PrintingFfiException('cupsReleaseJob is not supported on this platform');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsJobControlRequestId++;
@@ -1287,8 +1307,8 @@ class PrintingFfi {
   /// Returns `true` if the operation succeeded, `false` otherwise.
   /// Throws [PrintingFfiException] on error.
   Future<bool> cupsSetJobPriority(String printerName, int jobId, int priority, {String? username, String? password}) async {
-    if (!_isCups) {
-      throw PrintingFfiException('cupsSetJobPriority is only supported on macOS, Linux, and Android');
+    if (!_supportsQueueControl) {
+      throw PrintingFfiException('cupsSetJobPriority is not supported on this platform');
     }
     if (priority < 1 || priority > 100) {
       throw PrintingFfiException('Priority must be between 1 and 100');
@@ -1326,8 +1346,8 @@ class PrintingFfi {
   /// Returns a [PrinterAttribute] with the attribute value(s), or `null` if not found.
   /// Throws [PrintingFfiException] on error.
   Future<PrinterAttribute?> cupsGetPrinterAttribute(String printerName, String attributeName, {String? username, String? password}) async {
-    if (!_isCups) {
-      throw PrintingFfiException('cupsGetPrinterAttribute is only supported on macOS, Linux, and Android');
+    if (!_supportsQueueControl) {
+      throw PrintingFfiException('cupsGetPrinterAttribute is not supported on this platform');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsAttributeRequestId++;
@@ -1352,8 +1372,8 @@ class PrintingFfi {
   /// If an attribute is not found, it will still be included with an empty value.
   /// Throws [PrintingFfiException] on error.
   Future<List<PrinterAttribute>> cupsGetPrinterAttributes(String printerName, List<String> attributeNames, {String? username, String? password}) async {
-    if (!_isCups) {
-      throw PrintingFfiException('cupsGetPrinterAttributes is only supported on macOS, Linux, and Android');
+    if (!_supportsQueueControl) {
+      throw PrintingFfiException('cupsGetPrinterAttributes is not supported on this platform');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsAttributeRequestId++;
@@ -1386,8 +1406,8 @@ class PrintingFfi {
   /// Returns the full list of [PrinterAttribute] objects (empty if the printer
   /// reports none). Throws [PrintingFfiException] on error.
   Future<List<PrinterAttribute>> cupsGetAllPrinterAttributes(String printerName, {String? username, String? password}) async {
-    if (!_isCups) {
-      throw PrintingFfiException('cupsGetAllPrinterAttributes is only supported on macOS, Linux, and Android');
+    if (!_supportsQueueControl) {
+      throw PrintingFfiException('cupsGetAllPrinterAttributes is not supported on this platform');
     }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextCupsAttributeRequestId++;
@@ -2105,6 +2125,8 @@ void _helperIsolateEntryPoint(SendPort sendPort) {
                         jobInfo.id,
                         jobInfo.title.cast<Utf8>().toDartString(),
                         jobInfo.status,
+                        pagesPrinted: jobInfo.pages_printed,
+                        totalPages: jobInfo.total_pages,
                       ),
                     );
                   }

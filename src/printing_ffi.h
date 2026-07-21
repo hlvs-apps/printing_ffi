@@ -38,12 +38,21 @@ extern "C"
         PrinterInfo *printers;
     } PrinterList;
 
-    // Struct for returning print job information
+    // Struct for returning print job information.
+    // pages_printed / total_pages carry per-job page counts. On Windows they come from
+    // the spooler (JOB_INFO_2). On CUPS the job list does not include page counts without
+    // an extra per-job IPP query, so both are reported as -1 (unknown) there. total_pages
+    // is also -1 when unknown on Windows (the spooler reports 0 when the document has no
+    // page delimiters); pages_printed == 0 means "none yet" (or unknown if total is -1).
+    // NOTE: pages_printed / total_pages are appended at the END of this struct to keep the
+    // ABI of the existing leading fields stable.
     typedef struct
     {
         uint32_t id;
         char *title;
         uint32_t status;
+        int32_t pages_printed;
+        int32_t total_pages;
     } JobInfo;
 
     typedef struct

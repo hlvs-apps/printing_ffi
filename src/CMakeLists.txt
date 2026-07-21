@@ -32,7 +32,9 @@ if(WIN32)
     set(PDFIUM_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/windows/${PDFIUM_INCLUDE_DIR}")
   endif()
   target_include_directories(printing_ffi PUBLIC "${PDFIUM_INCLUDE_DIR}")
-  target_link_libraries(printing_ffi PUBLIC "gdi32.lib")
+  # gdi32: printer DCs + StretchDIBits. ole32: COM (CoInitializeEx/CoCreateInstance).
+  # windowscodecs: Windows Imaging Component (WIC) for decoding images to print.
+  target_link_libraries(printing_ffi PUBLIC "gdi32.lib" "ole32.lib" "windowscodecs.lib")
 endif()
 
 if(APPLE)

@@ -22,6 +22,20 @@
 #include "printing_ffi.h"
 
 #ifdef _WIN32
+    // Windows Imaging Component (WIC) for native image printing, used from C.
+    // COBJMACROS enables the C-style IWICxxx_Method(this, ...) vtable calls. This block
+    // is deliberately AFTER printing_ffi.h (which pulls in windows.h): initguid.h is
+    // included here, right before wincodec.h, so ONLY the WIC CLSID/IID/pixel-format
+    // GUIDs are instantiated in this translation unit (no separate GUID import lib
+    // needed) without also instantiating every windows.h GUID (which would risk
+    // duplicate-symbol link errors).
+    #define COBJMACROS
+    #include <objbase.h>
+    #include <initguid.h>
+    #include <wincodec.h>
+#endif
+
+#ifdef _WIN32
     #define strdup _strdup
 #else // macOS, Linux, Android (arm64-v8a with bundled static CUPS)
     #include <cups/cups.h>
@@ -262,6 +276,197 @@ static char *to_utf8(const wchar_t *utf16_str)
         return strdup(""); // Should not happen
     WideCharToMultiByte(CP_UTF8, 0, utf16_str, -1, utf8_str, len, NULL, NULL);
     return utf8_str;
+}
+
+// --- winspool job/printer-control helpers ---
+// Shared by pause/resume/cancel_print_job and the cups_* control functions so the
+// OpenPrinter / <op> / ClosePrinter boilerplate lives in exactly one place.
+
+// Opens a printer handle. Pass desired_access = 0 for the default handle used by job
+// queries / SetJob control; pass PRINTER_ACCESS_ADMINISTER for printer-control ops
+// (SetPrinter pause/resume, work-offline toggle). Returns a handle the caller must
+// ClosePrinter, or NULL on failure (set_last_error has details).
+static HANDLE _win_open_printer(const char *printer_name, DWORD desired_access)
+{
+    wchar_t *printer_name_w = to_utf16(printer_name);
+    if (!printer_name_w)
+    {
+        set_last_error("Failed to convert printer name '%s' to UTF-16.", printer_name ? printer_name : "(null)");
+        return NULL;
+    }
+    HANDLE hPrinter = NULL;
+    BOOL ok;
+    if (desired_access == 0)
+    {
+        ok = OpenPrinterW(printer_name_w, &hPrinter, NULL);
+    }
+    else
+    {
+        PRINTER_DEFAULTSW defaults = {NULL, NULL, desired_access};
+        ok = OpenPrinterW(printer_name_w, &hPrinter, &defaults);
+    }
+    free(printer_name_w);
+    if (!ok)
+    {
+        set_last_error("OpenPrinter failed for '%s'. Error: %lu", printer_name ? printer_name : "(null)", GetLastError());
+        return NULL;
+    }
+    return hPrinter;
+}
+
+// Issues a JOB_CONTROL_* command against a single job via SetJobW(level 0). Used by
+// pause/resume/cancel_print_job and cups_hold_job / cups_release_job (on Windows a
+// hold is a pause and a release is a resume). Returns true on success.
+static bool _win_set_job_command(const char *printer_name, uint32_t job_id, DWORD command)
+{
+    HANDLE hPrinter = _win_open_printer(printer_name, 0);
+    if (!hPrinter)
+        return false;
+    BOOL result = SetJobW(hPrinter, job_id, 0, NULL, command);
+    if (!result)
+    {
+        set_last_error("SetJob (command %lu) failed for job %u on '%s'. Error: %lu", command, job_id, printer_name, GetLastError());
+        LOG("_win_set_job_command: SetJobW(command=%lu) failed with error %lu", command, GetLastError());
+    }
+    ClosePrinter(hPrinter);
+    return result;
+}
+
+// Sets the Windows spooler priority of a single job. Accepts the public/CUPS 1..100
+// range and clamps to the Windows 1..99 range (100 -> 99; Windows priority is NOT
+// reversed: 1 = lowest, 99 = highest). Uses the documented GetJob(level 2) -> edit
+// Priority -> SetJob(level 2) sequence rather than hand-building a partial JOB_INFO_2.
+// Returns true on success (set_last_error has details on failure).
+static bool _win_set_job_priority(const char *printer_name, uint32_t job_id, int priority)
+{
+    HANDLE hPrinter = _win_open_printer(printer_name, 0);
+    if (!hPrinter)
+        return false;
+
+    DWORD needed = 0;
+    GetJobW(hPrinter, job_id, 2, NULL, 0, &needed); // query required buffer size
+    if (needed == 0)
+    {
+        set_last_error("GetJob (size) failed for job %u on '%s'. Error: %lu", job_id, printer_name, GetLastError());
+        ClosePrinter(hPrinter);
+        return false;
+    }
+    BYTE *buffer = (BYTE *)malloc(needed);
+    if (!buffer)
+    {
+        set_last_error("Out of memory querying job %u.", job_id);
+        ClosePrinter(hPrinter);
+        return false;
+    }
+    DWORD got = 0;
+    if (!GetJobW(hPrinter, job_id, 2, buffer, needed, &got))
+    {
+        set_last_error("GetJob failed for job %u on '%s'. Error: %lu", job_id, printer_name, GetLastError());
+        free(buffer);
+        ClosePrinter(hPrinter);
+        return false;
+    }
+
+    JOB_INFO_2W *ji = (JOB_INFO_2W *)buffer;
+    int win_priority = priority;
+    if (win_priority < 1)
+        win_priority = 1;
+    if (win_priority > 99)
+        win_priority = 99;
+    ji->Priority = (DWORD)win_priority;
+    ji->Position = JOB_POSITION_UNSPECIFIED; // don't move the job in the queue
+    ji->pSecurityDescriptor = NULL;          // required NULL for SetJob
+
+    BOOL ok = SetJobW(hPrinter, job_id, 2, buffer, 0);
+    if (!ok)
+        set_last_error("SetJob (priority=%d) failed for job %u on '%s'. Error: %lu", win_priority, job_id, printer_name, GetLastError());
+    free(buffer);
+    ClosePrinter(hPrinter);
+    return ok;
+}
+
+// Reads the "job-priority" option (public 1..100 range) from an option list, if
+// present, and applies it to a freshly-started spooler job. Lets printPdf/printImage
+// honor a requested priority on Windows instead of silently dropping it. Best-effort:
+// a failure only logs (the document has already been spooled).
+static void _win_apply_job_priority_option(const char *printer_name, uint32_t job_id, int num_options, const char **option_keys, const char **option_values)
+{
+    if (job_id == 0 || !option_keys || !option_values)
+        return;
+    for (int i = 0; i < num_options; i++)
+    {
+        if (option_keys[i] && option_values[i] && strcmp(option_keys[i], "job-priority") == 0)
+        {
+            int p = atoi(option_values[i]);
+            if (p > 0 && !_win_set_job_priority(printer_name, job_id, p))
+                LOG("_win_apply_job_priority_option: could not set priority %d on job %u", p, job_id);
+            return;
+        }
+    }
+}
+
+// Issues a printer-level control command (PRINTER_CONTROL_PAUSE / PRINTER_CONTROL_RESUME)
+// via SetPrinterW(level 0). Opens with PRINTER_ACCESS_ADMINISTER as these are admin ops.
+// Returns true on success (set_last_error has details).
+static bool _win_printer_control(const char *printer_name, DWORD command)
+{
+    HANDLE hPrinter = _win_open_printer(printer_name, PRINTER_ACCESS_ADMINISTER);
+    if (!hPrinter)
+        return false;
+    BOOL ok = SetPrinterW(hPrinter, 0, NULL, command);
+    if (!ok)
+        set_last_error("SetPrinter (command %lu) failed for '%s'. Error: %lu", command, printer_name, GetLastError());
+    ClosePrinter(hPrinter);
+    return ok;
+}
+
+// Toggles the PRINTER_ATTRIBUTE_WORK_OFFLINE bit on a printer. Reads the current
+// PRINTER_INFO_2 (level 2), flips ONLY that Attributes bit, nulls the security
+// descriptor, and writes it back — it does not synthesize or zero the rest of the
+// struct (the returned pDevMode is preserved as-is). Used as the Windows best-effort
+// for accept/reject-jobs: offline = new jobs queue but do not print. Returns true on
+// success (set_last_error has details).
+static bool _win_set_work_offline(const char *printer_name, bool offline)
+{
+    HANDLE hPrinter = _win_open_printer(printer_name, PRINTER_ACCESS_ADMINISTER);
+    if (!hPrinter)
+        return false;
+
+    DWORD needed = 0;
+    GetPrinterW(hPrinter, 2, NULL, 0, &needed); // query required size
+    if (needed == 0)
+    {
+        set_last_error("GetPrinter (size) failed for '%s'. Error: %lu", printer_name, GetLastError());
+        ClosePrinter(hPrinter);
+        return false;
+    }
+    PRINTER_INFO_2W *pi2 = (PRINTER_INFO_2W *)malloc(needed);
+    if (!pi2)
+    {
+        set_last_error("Out of memory querying printer '%s'.", printer_name);
+        ClosePrinter(hPrinter);
+        return false;
+    }
+    if (!GetPrinterW(hPrinter, 2, (LPBYTE)pi2, needed, &needed))
+    {
+        set_last_error("GetPrinter failed for '%s'. Error: %lu", printer_name, GetLastError());
+        free(pi2);
+        ClosePrinter(hPrinter);
+        return false;
+    }
+
+    if (offline)
+        pi2->Attributes |= PRINTER_ATTRIBUTE_WORK_OFFLINE;
+    else
+        pi2->Attributes &= ~PRINTER_ATTRIBUTE_WORK_OFFLINE;
+    pi2->pSecurityDescriptor = NULL; // required NULL for SetPrinter
+
+    BOOL ok = SetPrinterW(hPrinter, 2, (LPBYTE)pi2, 0);
+    if (!ok)
+        set_last_error("SetPrinter (work-offline=%d) failed for '%s'. Error: %lu", (int)offline, printer_name, GetLastError());
+    free(pi2);
+    ClosePrinter(hPrinter);
+    return ok;
 }
 
 // Helper function to parse page ranges.
@@ -1095,6 +1300,91 @@ static void _scale_to_fit(int src_width, int src_height, int target_width, int t
 
 #ifdef _WIN32
 
+// Parse an alignment string ("left"/"right"/"top"/"bottom", combinable e.g. "top-left")
+// into x/y factors in [0,1]: 0 = left/top, 0.5 = center (default), 1 = right/bottom.
+// Shared by the PDF and image print paths.
+static void parse_print_alignment(const char *alignment, double *align_x_factor, double *align_y_factor)
+{
+    *align_x_factor = 0.5; // Default to center
+    *align_y_factor = 0.5; // Default to center
+    if (!alignment)
+        return;
+    char *alignment_lower = strdup(alignment);
+    if (!alignment_lower)
+        return;
+    for (int i = 0; alignment_lower[i]; i++)
+        alignment_lower[i] = (char)tolower((unsigned char)alignment_lower[i]);
+    if (strstr(alignment_lower, "left"))
+        *align_x_factor = 0.0;
+    else if (strstr(alignment_lower, "right"))
+        *align_x_factor = 1.0;
+    if (strstr(alignment_lower, "top"))
+        *align_y_factor = 0.0;
+    else if (strstr(alignment_lower, "bottom"))
+        *align_y_factor = 1.0;
+    free(alignment_lower);
+}
+
+// Given a source content size in device pixels and a printer DC, compute the
+// destination rectangle (position + size) for a scaling mode and alignment. Shared by
+// the PDF and image print paths so the two stay in lockstep.
+//   scaling_mode: 1 = actual size, 2 = shrink to fit, 3 = fit to physical paper,
+//                 4 = custom scale, 0/other = fit to printable area (default).
+static void compute_dest_rect(HDC hdc, int src_pixel_width, int src_pixel_height,
+                              int scaling_mode, double custom_scale,
+                              double align_x_factor, double align_y_factor,
+                              int *dest_x, int *dest_y, int *dest_width, int *dest_height)
+{
+    int printable_width_pixels = GetDeviceCaps(hdc, HORZRES);
+    int printable_height_pixels = GetDeviceCaps(hdc, VERTRES);
+
+    if (scaling_mode == 1)
+    { // Actual Size
+        *dest_width = src_pixel_width;
+        *dest_height = src_pixel_height;
+    }
+    else if (scaling_mode == 2)
+    { // Shrink to Fit: scale down only if larger than the printable area
+        if (src_pixel_width > printable_width_pixels || src_pixel_height > printable_height_pixels)
+            _scale_to_fit(src_pixel_width, src_pixel_height, printable_width_pixels, printable_height_pixels, dest_width, dest_height);
+        else
+        {
+            *dest_width = src_pixel_width;
+            *dest_height = src_pixel_height;
+        }
+    }
+    else if (scaling_mode == 3)
+    { // Fit to physical Paper
+        int paper_width = GetDeviceCaps(hdc, PHYSICALWIDTH);
+        int paper_height = GetDeviceCaps(hdc, PHYSICALHEIGHT);
+        _scale_to_fit(src_pixel_width, src_pixel_height, paper_width, paper_height, dest_width, dest_height);
+    }
+    else if (scaling_mode == 4)
+    { // Custom Scale
+        *dest_width = (int)(src_pixel_width * custom_scale);
+        *dest_height = (int)(src_pixel_height * custom_scale);
+    }
+    else
+    { // 0 / default: Fit to Printable Area
+        _scale_to_fit(src_pixel_width, src_pixel_height, printable_width_pixels, printable_height_pixels, dest_width, dest_height);
+    }
+
+    if (scaling_mode == 3)
+    { // Fit to Paper alignment is relative to physical paper
+        int paper_width = GetDeviceCaps(hdc, PHYSICALWIDTH);
+        int paper_height = GetDeviceCaps(hdc, PHYSICALHEIGHT);
+        int offset_x = GetDeviceCaps(hdc, PHYSICALOFFSETX);
+        int offset_y = GetDeviceCaps(hdc, PHYSICALOFFSETY);
+        *dest_x = (int)((paper_width - *dest_width) * align_x_factor) - offset_x;
+        *dest_y = (int)((paper_height - *dest_height) * align_y_factor) - offset_y;
+    }
+    else
+    { // All other modes are relative to the printable area
+        *dest_x = (int)((printable_width_pixels - *dest_width) * align_x_factor);
+        *dest_y = (int)((printable_height_pixels - *dest_height) * align_y_factor);
+    }
+}
+
 // Common internal function for PDF printing on Windows.
 // Returns a job ID if `submit_job` is true, otherwise returns 1 for success or 0 for failure.
 static int32_t _print_pdf_job_win(const char *printer_name, const char *pdf_file_path, const char *doc_name, int scaling_mode, int copies, const char *page_range, const char *alignment, int num_options, const char **option_keys, const char **option_values, bool submit_job)
@@ -1215,40 +1505,8 @@ static int32_t _print_pdf_job_win(const char *printer_name, const char *pdf_file
     LOG("print_pdf_job_win: Page range parsed successfully. Copies: %d.", copies);
 
     // --- Alignment ---
-    double align_x_factor = 0.5; // Default to center
-    double align_y_factor = 0.5; // Default to center
-
-    if (alignment)
-    {
-        char *alignment_lower = strdup(alignment);
-        if (alignment_lower)
-        {
-            for (int i = 0; alignment_lower[i]; i++)
-            {
-                alignment_lower[i] = tolower(alignment_lower[i]);
-            }
-
-            if (strstr(alignment_lower, "left"))
-            {
-                align_x_factor = 0.0;
-            }
-            else if (strstr(alignment_lower, "right"))
-            {
-                align_x_factor = 1.0;
-            }
-
-            if (strstr(alignment_lower, "top"))
-            {
-                align_y_factor = 0.0;
-            }
-            else if (strstr(alignment_lower, "bottom"))
-            {
-                align_y_factor = 1.0;
-            }
-
-            free(alignment_lower);
-        }
-    }
+    double align_x_factor, align_y_factor;
+    parse_print_alignment(alignment, &align_x_factor, &align_y_factor);
 
     bool success = true;
     // The outer loop for copies is removed. The driver will handle it via DEVMODE.
@@ -1313,79 +1571,17 @@ static int32_t _print_pdf_job_win(const char *printer_name, const char *pdf_file
 
         int dpi_x = GetDeviceCaps(hdc, LOGPIXELSX);
         int dpi_y = GetDeviceCaps(hdc, LOGPIXELSY);
-        int printable_width_pixels = GetDeviceCaps(hdc, HORZRES);
-        int printable_height_pixels = GetDeviceCaps(hdc, VERTRES);
 
         LOG("print_pdf_job_win: Page %d: PDF Dimensions (pt): %.2f x %.2f", i, pdf_width_pt, pdf_height_pt);
         LOG("print_pdf_job_win: Page %d: Device DPI: %d x %d", i, dpi_x, dpi_y);
-        LOG("print_pdf_job_win: Page %d: Printable Area (pixels): %d x %d", i, printable_width_pixels, printable_height_pixels);
 
         // Calculate the PDF page size in device pixels.
         int pdf_pixel_width = (int)(pdf_width_pt / 72.0f * dpi_x);
         int pdf_pixel_height = (int)(pdf_height_pt / 72.0f * dpi_y);
 
-        if (scaling_mode == 0)
-        { // Fit to Printable Area (formerly Fit Page)
-            _scale_to_fit(pdf_pixel_width, pdf_pixel_height, printable_width_pixels, printable_height_pixels, &dest_width, &dest_height);
-            LOG("print_pdf_job_win: Page %d: ScalingMode=FitToPrintableArea, Dest=(%d,%d)", i, dest_width, dest_height);
-        }
-        else if (scaling_mode == 1)
-        { // Actual Size
-            // Calculate actual size in device pixels
-            dest_width = pdf_pixel_width;
-            dest_height = pdf_pixel_height;
-            LOG("print_pdf_job_win: Page %d: ScalingMode=ActualSize, Dest=(%d,%d)", i, dest_width, dest_height);
-        }
-        else if (scaling_mode == 2)
-        { // Shrink to Fit
-            // If the PDF page is larger than the printable area, scale down to fit.
-            // Otherwise, print at actual size.
-            if (pdf_pixel_width > printable_width_pixels || pdf_pixel_height > printable_height_pixels)
-            {
-                _scale_to_fit(pdf_pixel_width, pdf_pixel_height, printable_width_pixels, printable_height_pixels, &dest_width, &dest_height);
-                LOG("print_pdf_job_win: Page %d: ScalingMode=ShrinkToFit (scaled), Dest=(%d,%d)", i, dest_width, dest_height);
-            }
-            else
-            {
-                dest_width = pdf_pixel_width;
-                dest_height = pdf_pixel_height;
-                LOG("print_pdf_job_win: Page %d: ScalingMode=ShrinkToFit (actual size), Dest=(%d,%d)", i, dest_width, dest_height);
-            }
-        }
-        else if (scaling_mode == 3)
-        { // Fit to Paper
-            int paper_width = GetDeviceCaps(hdc, PHYSICALWIDTH);
-            int paper_height = GetDeviceCaps(hdc, PHYSICALHEIGHT);
-            _scale_to_fit(pdf_pixel_width, pdf_pixel_height, paper_width, paper_height, &dest_width, &dest_height);
-            LOG("print_pdf_job_win: Page %d: ScalingMode=FitToPaper, Dest=(%d,%d)", i, dest_width, dest_height);
-        }
-        else if (scaling_mode == 4)
-        { // Custom Scale
-            // Apply custom scale factor
-            dest_width = (int)(pdf_pixel_width * custom_scale);
-            dest_height = (int)(pdf_pixel_height * custom_scale);
-            LOG("print_pdf_job_win: Page %d: ScalingMode=CustomScale (%.2f), Dest=(%d,%d)", i, custom_scale, dest_width, dest_height);
-        }
-        else
-        { // Default to Fit to Printable Area
-            _scale_to_fit(pdf_pixel_width, pdf_pixel_height, printable_width_pixels, printable_height_pixels, &dest_width, &dest_height);
-            LOG("print_pdf_job_win: Page %d: ScalingMode=Default (FitToPrintableArea), Dest=(%d,%d)", i, dest_width, dest_height);
-        }
-
-        if (scaling_mode == 3)
-        { // Fit to Paper alignment is relative to physical paper
-            int paper_width = GetDeviceCaps(hdc, PHYSICALWIDTH);
-            int paper_height = GetDeviceCaps(hdc, PHYSICALHEIGHT);
-            int offset_x = GetDeviceCaps(hdc, PHYSICALOFFSETX);
-            int offset_y = GetDeviceCaps(hdc, PHYSICALOFFSETY);
-            dest_x = (int)((paper_width - dest_width) * align_x_factor) - offset_x;
-            dest_y = (int)((paper_height - dest_height) * align_y_factor) - offset_y;
-        }
-        else
-        { // All other modes are relative to the printable area
-            dest_x = (int)((printable_width_pixels - dest_width) * align_x_factor);
-            dest_y = (int)((printable_height_pixels - dest_height) * align_y_factor);
-        }
+        // Compute the destination rectangle (scaling + alignment). Shared with image printing.
+        compute_dest_rect(hdc, pdf_pixel_width, pdf_pixel_height, scaling_mode, custom_scale,
+                          align_x_factor, align_y_factor, &dest_x, &dest_y, &dest_width, &dest_height);
 
         LOG("print_pdf_job_win: Page %d: Final DestRect=(%d,%d, %dx%d)", i, dest_x, dest_y, dest_width, dest_height);
 
@@ -1423,6 +1619,8 @@ static int32_t _print_pdf_job_win(const char *printer_name, const char *pdf_file
     {
         LOG("print_pdf_job_win: All pages processed successfully. Calling EndDoc.");
         EndDoc(hdc);
+        // Honor a requested job priority (Windows previously ignored it silently).
+        _win_apply_job_priority_option(printer_name, (uint32_t)job_id, num_options, option_keys, option_values);
     }
     else
     {
@@ -1442,6 +1640,260 @@ static int32_t _print_pdf_job_win(const char *printer_name, const char *pdf_file
     {
         return success ? 1 : 0;
     }
+}
+
+// Prints a single raster image (jpg/png/bmp/gif/tiff/...) to a Windows printer using
+// WIC to decode, a printer DC, and StretchDIBits. The image is scaled to fit the
+// printable area, centered, preserving aspect ratio. Alpha is composited onto white
+// (GDI does not honor alpha). Returns the spooler job id when `submit_job` is true,
+// otherwise 1 on success; 0 on failure (get_last_error has details).
+//
+//   file -> WIC decoder -> frame -> IWICBitmapScaler (bound to dest size)
+//        -> IWICFormatConverter(32bpp PBGRA) -> CopyPixels -> composite-over-white
+//        -> top-down 32bpp DIB -> StretchDIBits -> printer DC
+static int32_t _print_image_job_win(const char *printer_name, const char *image_file_path, const char *doc_name, int num_options, const char **option_keys, const char **option_values, bool submit_job)
+{
+    set_last_error("");
+
+    // All cleanup-referenced state is declared+initialized up front so a `goto cleanup`
+    // that skips a later initializer never reads an indeterminate value.
+    wchar_t *printer_name_w = NULL;
+    wchar_t *image_path_w = NULL;
+    wchar_t *doc_name_w = NULL;
+    bool com_should_uninit = false;
+    IWICImagingFactory *factory = NULL;
+    IWICBitmapDecoder *decoder = NULL;
+    IWICBitmapFrameDecode *frame = NULL;
+    IWICBitmapScaler *scaler = NULL;
+    IWICFormatConverter *converter = NULL;
+    BYTE *pixels = NULL;
+    HDC hdc = NULL;
+    DEVMODEW *pDevMode = NULL;
+    int32_t result = 0;
+    int job_id = 0;
+    bool doc_started = false;
+    bool page_started = false;
+
+    int paper_size_id, paper_source_id, orientation, color_mode, print_quality, media_type_id, duplex_mode, pdf_rotation;
+    double custom_scale;
+    bool collate = true;
+    parse_windows_options(num_options, option_keys, option_values, &paper_size_id, &paper_source_id, &orientation, &color_mode, &print_quality, &media_type_id, &custom_scale, &collate, &duplex_mode, &pdf_rotation);
+
+    printer_name_w = to_utf16(printer_name);
+    image_path_w = to_utf16(image_file_path);
+    doc_name_w = to_utf16(doc_name);
+    if (!printer_name_w || !image_path_w)
+    {
+        set_last_error("Failed to convert printer name / image path to UTF-16.");
+        goto cleanup;
+    }
+
+    // --- COM / WIC init on this (helper-isolate) thread ---
+    {
+        HRESULT hr_init = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+        if (hr_init == S_OK || hr_init == S_FALSE)
+        {
+            com_should_uninit = true; // we initialized it; balance with CoUninitialize
+        }
+        else if (hr_init == RPC_E_CHANGED_MODE)
+        {
+            com_should_uninit = false; // COM already up in another mode; proceed, do NOT uninit
+        }
+        else
+        {
+            set_last_error("CoInitializeEx failed. HRESULT: 0x%08lX", (unsigned long)hr_init);
+            goto cleanup;
+        }
+    }
+
+    if (FAILED(CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, &IID_IWICImagingFactory, (void **)&factory)) || !factory)
+    {
+        set_last_error("Failed to create WIC imaging factory.");
+        goto cleanup;
+    }
+
+    if (FAILED(IWICImagingFactory_CreateDecoderFromFilename(factory, image_path_w, NULL, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder)) || !decoder)
+    {
+        set_last_error("WIC could not open image '%s'. The file may be missing, corrupt, or an unsupported format.", image_file_path);
+        goto cleanup;
+    }
+
+    if (FAILED(IWICBitmapDecoder_GetFrame(decoder, 0, &frame)) || !frame)
+    {
+        set_last_error("WIC could not read the first image frame of '%s'.", image_file_path);
+        goto cleanup;
+    }
+
+    UINT img_w = 0, img_h = 0;
+    if (FAILED(IWICBitmapFrameDecode_GetSize(frame, &img_w, &img_h)) || img_w == 0 || img_h == 0)
+    {
+        set_last_error("WIC returned an invalid image size for '%s'.", image_file_path);
+        goto cleanup;
+    }
+
+    // --- Printer DC ---
+    pDevMode = get_modified_devmode(printer_name_w, paper_size_id, paper_source_id, orientation, color_mode, print_quality, media_type_id, 1, collate, duplex_mode);
+    hdc = CreateDCW(L"WINSPOOL", printer_name_w, NULL, pDevMode);
+    if (pDevMode)
+    {
+        free(pDevMode);
+        pDevMode = NULL;
+    }
+    if (!hdc)
+    {
+        set_last_error("Failed to create device context for printer '%s'. Error: %lu", printer_name, GetLastError());
+        goto cleanup;
+    }
+
+    // --- Destination rectangle: fit to printable area, centered ---
+    int dest_x = 0, dest_y = 0, dest_width = 0, dest_height = 0;
+    compute_dest_rect(hdc, (int)img_w, (int)img_h, 0 /* fit printable area */, custom_scale, 0.5, 0.5, &dest_x, &dest_y, &dest_width, &dest_height);
+    if (dest_width < 1)
+        dest_width = 1;
+    if (dest_height < 1)
+        dest_height = 1;
+
+    // --- Scale to the destination size (bounds memory for huge photos) then convert
+    //     to 32bpp premultiplied BGRA ---
+    if (FAILED(IWICImagingFactory_CreateBitmapScaler(factory, &scaler)) || !scaler)
+    {
+        set_last_error("WIC CreateBitmapScaler failed.");
+        goto cleanup;
+    }
+    if (FAILED(IWICBitmapScaler_Initialize(scaler, (IWICBitmapSource *)frame, (UINT)dest_width, (UINT)dest_height, WICBitmapInterpolationModeFant)))
+    {
+        set_last_error("WIC scaler initialization failed.");
+        goto cleanup;
+    }
+
+    if (FAILED(IWICImagingFactory_CreateFormatConverter(factory, &converter)) || !converter)
+    {
+        set_last_error("WIC CreateFormatConverter failed.");
+        goto cleanup;
+    }
+    if (FAILED(IWICFormatConverter_Initialize(converter, (IWICBitmapSource *)scaler, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, NULL, 0.0, WICBitmapPaletteTypeCustom)))
+    {
+        set_last_error("WIC pixel-format conversion failed.");
+        goto cleanup;
+    }
+
+    // Top-down 32bpp buffer (negative biHeight below); 32bpp rows are inherently
+    // DWORD-aligned so no stride padding is needed.
+    UINT stride = (UINT)dest_width * 4u;
+    size_t buf_size = (size_t)stride * (size_t)dest_height;
+    if (buf_size / 4 != (size_t)dest_width * (size_t)dest_height) // overflow guard
+    {
+        set_last_error("Image destination dimensions overflow.");
+        goto cleanup;
+    }
+    pixels = (BYTE *)malloc(buf_size);
+    if (!pixels)
+    {
+        set_last_error("Out of memory allocating %zu bytes for the image bitmap.", buf_size);
+        goto cleanup;
+    }
+    if (FAILED(IWICFormatConverter_CopyPixels(converter, NULL, stride, (UINT)buf_size, pixels)))
+    {
+        set_last_error("WIC CopyPixels failed.");
+        goto cleanup;
+    }
+
+    // Composite premultiplied BGRA over a white background (GDI does not honor alpha):
+    // over-white on premultiplied data is simply channel += (255 - alpha), then opaque.
+    for (size_t p = 0; p + 3 < buf_size; p += 4)
+    {
+        unsigned inv = 255u - pixels[p + 3];
+        unsigned b = (unsigned)pixels[p + 0] + inv;
+        unsigned g = (unsigned)pixels[p + 1] + inv;
+        unsigned r = (unsigned)pixels[p + 2] + inv;
+        pixels[p + 0] = (BYTE)(b > 255u ? 255u : b);
+        pixels[p + 1] = (BYTE)(g > 255u ? 255u : g);
+        pixels[p + 2] = (BYTE)(r > 255u ? 255u : r);
+        pixels[p + 3] = 255;
+    }
+
+    // --- Start the document/page and blit ---
+    DOCINFOW di;
+    memset(&di, 0, sizeof(di));
+    di.cbSize = sizeof(di);
+    di.lpszDocName = doc_name_w;
+    job_id = StartDocW(hdc, &di);
+    if (job_id <= 0)
+    {
+        set_last_error("StartDoc failed for image print. Error: %lu", GetLastError());
+        goto cleanup;
+    }
+    doc_started = true;
+
+    if (StartPage(hdc) <= 0)
+    {
+        set_last_error("StartPage failed for image print. Error: %lu", GetLastError());
+        goto cleanup;
+    }
+    page_started = true;
+
+    BITMAPINFO bmi;
+    memset(&bmi, 0, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = dest_width;
+    bmi.bmiHeader.biHeight = -dest_height; // negative => top-down rows (WIC CopyPixels order)
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    SetStretchBltMode(hdc, HALFTONE);
+    SetBrushOrgEx(hdc, 0, 0, NULL);
+    // Scaler already produced dest_width x dest_height, so this is a 1:1 blit.
+    int scanlines = StretchDIBits(hdc, dest_x, dest_y, dest_width, dest_height, 0, 0, dest_width, dest_height, pixels, &bmi, DIB_RGB_COLORS, SRCCOPY);
+    if (scanlines == 0 || scanlines == GDI_ERROR)
+    {
+        set_last_error("StretchDIBits failed. Error: %lu", GetLastError());
+        goto cleanup;
+    }
+
+    if (EndPage(hdc) <= 0)
+    {
+        set_last_error("EndPage failed for image print. Error: %lu", GetLastError());
+        goto cleanup;
+    }
+    page_started = false;
+    if (EndDoc(hdc) <= 0)
+    {
+        set_last_error("EndDoc failed for image print. Error: %lu", GetLastError());
+        goto cleanup;
+    }
+    doc_started = false;
+
+    // Honor a requested job priority now that we have a spooler job id.
+    _win_apply_job_priority_option(printer_name, (uint32_t)job_id, num_options, option_keys, option_values);
+
+    result = submit_job ? job_id : 1;
+
+cleanup:
+    if (page_started && hdc)
+        EndPage(hdc);
+    if (doc_started && hdc)
+        AbortDoc(hdc);
+    if (pixels)
+        free(pixels);
+    if (converter)
+        IWICFormatConverter_Release(converter);
+    if (scaler)
+        IWICBitmapScaler_Release(scaler);
+    if (frame)
+        IWICBitmapFrameDecode_Release(frame);
+    if (decoder)
+        IWICBitmapDecoder_Release(decoder);
+    if (factory)
+        IWICImagingFactory_Release(factory);
+    if (hdc)
+        DeleteDC(hdc);
+    if (com_should_uninit)
+        CoUninitialize();
+    free(printer_name_w);
+    free(image_path_w);
+    free(doc_name_w);
+    return result;
 }
 #endif
 
@@ -2642,6 +3094,10 @@ FFI_PLUGIN_EXPORT JobList *get_print_jobs(const char *printer_name)
             list->jobs[i].id = jobs[i].JobId;
             list->jobs[i].title = to_utf8(jobs[i].pDocument);
             list->jobs[i].status = (int)jobs[i].Status;
+            list->jobs[i].pages_printed = (int32_t)jobs[i].PagesPrinted;
+            // The spooler reports TotalPages == 0 when the document has no page
+            // delimiters; surface that as -1 (unknown) rather than a real count.
+            list->jobs[i].total_pages = jobs[i].TotalPages > 0 ? (int32_t)jobs[i].TotalPages : -1;
         }
     }
     else
@@ -2683,6 +3139,10 @@ FFI_PLUGIN_EXPORT JobList *get_print_jobs(const char *printer_name)
         list->jobs[i].id = (uint32_t)jobs[i].id;
         list->jobs[i].title = strdup(jobs[i].title ? jobs[i].title : "Unknown");
         list->jobs[i].status = jobs[i].state;
+        // CUPS' job list carries no page counts without an extra per-job IPP query;
+        // report unknown rather than pay an N+1 on every job list.
+        list->jobs[i].pages_printed = -1;
+        list->jobs[i].total_pages = -1;
     }
     cupsFreeJobs(num_jobs, jobs);
     return list;
@@ -2859,22 +3319,7 @@ FFI_PLUGIN_EXPORT bool pause_print_job(const char *printer_name, uint32_t job_id
     }
 
 #ifdef _WIN32
-    HANDLE hPrinter;
-    wchar_t *printer_name_w = to_utf16(printer_name);
-    if (!printer_name_w)
-        return false;
-    if (!OpenPrinterW(printer_name_w, &hPrinter, NULL))
-    {
-        free(printer_name_w);
-        return false;
-    }
-    free(printer_name_w);
-
-    bool result = SetJobW(hPrinter, job_id, 0, NULL, JOB_CONTROL_PAUSE);
-    if (!result)
-        LOG("SetJobW(PAUSE) failed with error %lu", GetLastError());
-    ClosePrinter(hPrinter);
-    return result;
+    return _win_set_job_command(printer_name, job_id, JOB_CONTROL_PAUSE);
 #else
     bool result = cupsCancelJob2(CUPS_HTTP_DEFAULT, printer_name, (int)job_id, IPP_HOLD_JOB) == 1;
     if (!result)
@@ -2891,22 +3336,7 @@ FFI_PLUGIN_EXPORT bool resume_print_job(const char *printer_name, uint32_t job_i
     }
 
 #ifdef _WIN32
-    HANDLE hPrinter;
-    wchar_t *printer_name_w = to_utf16(printer_name);
-    if (!printer_name_w)
-        return false;
-    if (!OpenPrinterW(printer_name_w, &hPrinter, NULL))
-    {
-        free(printer_name_w);
-        return false;
-    }
-    free(printer_name_w);
-
-    bool result = SetJobW(hPrinter, job_id, 0, NULL, JOB_CONTROL_RESUME);
-    if (!result)
-        LOG("SetJobW(RESUME) failed with error %lu", GetLastError());
-    ClosePrinter(hPrinter);
-    return result;
+    return _win_set_job_command(printer_name, job_id, JOB_CONTROL_RESUME);
 #else
     bool result = cupsCancelJob2(CUPS_HTTP_DEFAULT, printer_name, (int)job_id, IPP_RELEASE_JOB) == 1;
     if (!result)
@@ -2923,22 +3353,9 @@ FFI_PLUGIN_EXPORT bool cancel_print_job(const char *printer_name, uint32_t job_i
     }
 
 #ifdef _WIN32
-    HANDLE hPrinter;
-    wchar_t *printer_name_w = to_utf16(printer_name);
-    if (!printer_name_w)
-        return false;
-    if (!OpenPrinterW(printer_name_w, &hPrinter, NULL))
-    {
-        free(printer_name_w);
-        return false;
-    }
-    free(printer_name_w);
-
-    bool result = SetJobW(hPrinter, job_id, 0, NULL, JOB_CONTROL_CANCEL);
-    if (!result)
-        LOG("SetJobW(CANCEL) failed with error %lu", GetLastError());
-    ClosePrinter(hPrinter);
-    return result;
+    // JOB_CONTROL_DELETE (not the deprecated JOB_CONTROL_CANCEL) is the documented
+    // way to remove a job from the queue.
+    return _win_set_job_command(printer_name, job_id, JOB_CONTROL_DELETE);
 #else
     bool result = cupsCancelJob(printer_name, (int)job_id) == 1;
     if (!result)
@@ -3538,8 +3955,34 @@ FFI_PLUGIN_EXPORT int32_t submit_file_job(const char *printer_name, const char *
     }
 
 #ifdef _WIN32
-    set_last_error("submit_file_job is not supported on Windows.");
-    return 0;
+    // Windows has no server-side rasterizer, so route by content: a PDF goes through the
+    // PDFium path (fit-to-page, all pages, centered); any other type is handed to WIC
+    // (jpg/png/bmp/gif/tiff/...). Undecodable types return 0 with a clear error.
+    {
+        wchar_t *file_path_w = to_utf16(file_path);
+        if (!file_path_w)
+        {
+            set_last_error("Failed to convert file path to UTF-16.");
+            return 0;
+        }
+        unsigned char magic[4] = {0};
+        FILE *f = _wfopen(file_path_w, L"rb");
+        free(file_path_w);
+        if (!f)
+        {
+            set_last_error("Could not open file '%s'.", file_path);
+            return 0;
+        }
+        size_t n = fread(magic, 1, sizeof(magic), f);
+        fclose(f);
+
+        bool is_pdf = (n >= 4 && magic[0] == '%' && magic[1] == 'P' && magic[2] == 'D' && magic[3] == 'F');
+        if (is_pdf)
+        {
+            return _print_pdf_job_win(printer_name, file_path, doc_name, 0 /* fit page */, 1 /* copies */, NULL /* all pages */, NULL /* center */, num_options, option_keys, option_values, true /* submit */);
+        }
+        return _print_image_job_win(printer_name, file_path, doc_name, num_options, option_keys, option_values, true);
+    }
 #else // macOS / Linux / Android (CUPS)
     cups_option_t *options = NULL;
     int num_cups_options = 0;
@@ -3766,8 +4209,10 @@ static bool execute_ipp_request(http_t *http, ipp_t *request, const char *operat
 FFI_PLUGIN_EXPORT bool cups_pause_printer(const char *printer_name, const char *username, const char *password)
 {
 #ifdef _WIN32
-    set_last_error("cups_pause_printer is not supported on Windows");
-    return false;
+    // Windows: pause the print queue via SetPrinter(PRINTER_CONTROL_PAUSE).
+    (void)username;
+    (void)password;
+    return _win_printer_control(printer_name, PRINTER_CONTROL_PAUSE);
 #else
     if (!printer_name)
     {
@@ -3788,8 +4233,10 @@ FFI_PLUGIN_EXPORT bool cups_pause_printer(const char *printer_name, const char *
 FFI_PLUGIN_EXPORT bool cups_resume_printer(const char *printer_name, const char *username, const char *password)
 {
 #ifdef _WIN32
-    set_last_error("cups_resume_printer is not supported on Windows");
-    return false;
+    // Windows: resume the print queue via SetPrinter(PRINTER_CONTROL_RESUME).
+    (void)username;
+    (void)password;
+    return _win_printer_control(printer_name, PRINTER_CONTROL_RESUME);
 #else
     if (!printer_name)
     {
@@ -3810,8 +4257,12 @@ FFI_PLUGIN_EXPORT bool cups_resume_printer(const char *printer_name, const char 
 FFI_PLUGIN_EXPORT bool cups_enable_printer(const char *printer_name, const char *username, const char *password)
 {
 #ifdef _WIN32
-    set_last_error("cups_enable_printer is not supported on Windows");
-    return false;
+    // Windows has no separate "enable" vs "resume": the spooler only pauses/resumes a
+    // queue. enable_printer is therefore a Windows alias of resume_printer. It does NOT
+    // affect whether the queue accepts new jobs (see cups_accept_jobs/cups_reject_jobs).
+    (void)username;
+    (void)password;
+    return _win_printer_control(printer_name, PRINTER_CONTROL_RESUME);
 #else
     if (!printer_name)
     {
@@ -3835,8 +4286,12 @@ FFI_PLUGIN_EXPORT bool cups_enable_printer(const char *printer_name, const char 
 FFI_PLUGIN_EXPORT bool cups_disable_printer(const char *printer_name, const char *reason, const char *username, const char *password)
 {
 #ifdef _WIN32
-    set_last_error("cups_disable_printer is not supported on Windows");
-    return false;
+    // Windows alias of pause_printer (see cups_enable_printer). The `reason` string has
+    // no winspool equivalent and is ignored.
+    (void)reason;
+    (void)username;
+    (void)password;
+    return _win_printer_control(printer_name, PRINTER_CONTROL_PAUSE);
 #else
     if (!printer_name)
     {
@@ -3908,8 +4363,11 @@ FFI_PLUGIN_EXPORT bool cups_disable_printer(const char *printer_name, const char
 FFI_PLUGIN_EXPORT bool cups_accept_jobs(const char *printer_name, const char *username, const char *password)
 {
 #ifdef _WIN32
-    set_last_error("cups_accept_jobs is not supported on Windows");
-    return false;
+    // Windows best-effort: clear the WORK_OFFLINE bit so the queue prints normally.
+    // NOTE: Windows cannot truly "reject" new submissions; see cups_reject_jobs.
+    (void)username;
+    (void)password;
+    return _win_set_work_offline(printer_name, false);
 #else
     if (!printer_name)
     {
@@ -3933,8 +4391,15 @@ FFI_PLUGIN_EXPORT bool cups_accept_jobs(const char *printer_name, const char *us
 FFI_PLUGIN_EXPORT bool cups_reject_jobs(const char *printer_name, const char *reason, const char *username, const char *password)
 {
 #ifdef _WIN32
-    set_last_error("cups_reject_jobs is not supported on Windows");
-    return false;
+    // Windows best-effort emulation: there is NO winspool call to refuse new
+    // submissions. Setting the printer to "work offline" is the closest lever — new
+    // jobs are still ACCEPTED into the queue, they just do not print until the printer
+    // is brought back online (cups_accept_jobs). This differs from CUPS "reject", which
+    // makes the submission itself fail. The `reason` string has no equivalent.
+    (void)reason;
+    (void)username;
+    (void)password;
+    return _win_set_work_offline(printer_name, true);
 #else
     if (!printer_name)
     {
@@ -3996,8 +4461,10 @@ FFI_PLUGIN_EXPORT bool cups_reject_jobs(const char *printer_name, const char *re
 FFI_PLUGIN_EXPORT bool cups_hold_job(const char *printer_name, uint32_t job_id, const char *username, const char *password)
 {
 #ifdef _WIN32
-    set_last_error("cups_hold_job is not supported on Windows");
-    return false;
+    // Windows: holding a job is pausing it in the queue.
+    (void)username;
+    (void)password;
+    return _win_set_job_command(printer_name, job_id, JOB_CONTROL_PAUSE);
 #else
     if (!printer_name)
     {
@@ -4054,8 +4521,10 @@ FFI_PLUGIN_EXPORT bool cups_hold_job(const char *printer_name, uint32_t job_id, 
 FFI_PLUGIN_EXPORT bool cups_release_job(const char *printer_name, uint32_t job_id, const char *username, const char *password)
 {
 #ifdef _WIN32
-    set_last_error("cups_release_job is not supported on Windows");
-    return false;
+    // Windows: releasing a held job is resuming it in the queue.
+    (void)username;
+    (void)password;
+    return _win_set_job_command(printer_name, job_id, JOB_CONTROL_RESUME);
 #else
     if (!printer_name)
     {
@@ -4109,7 +4578,15 @@ FFI_PLUGIN_EXPORT bool cups_release_job(const char *printer_name, uint32_t job_i
 FFI_PLUGIN_EXPORT bool cups_move_job(const char *source_printer, uint32_t job_id, const char *dest_printer, const char *username, const char *password)
 {
 #ifdef _WIN32
-    set_last_error("cups_move_job is not supported on Windows");
+    // The Windows spooler has no API to move a queued job between printers; doing so
+    // would require reading and re-spooling the raw job data, which is not generally
+    // possible. Intentionally unsupported on Windows.
+    (void)source_printer;
+    (void)job_id;
+    (void)dest_printer;
+    (void)username;
+    (void)password;
+    set_last_error("cups_move_job is not supported on Windows (the spooler cannot move a job between printers).");
     return false;
 #else
     if (!source_printer || !dest_printer)
@@ -4168,8 +4645,10 @@ FFI_PLUGIN_EXPORT bool cups_move_job(const char *source_printer, uint32_t job_id
 FFI_PLUGIN_EXPORT bool cups_set_job_priority(const char *printer_name, uint32_t job_id, int priority, const char *username, const char *password)
 {
 #ifdef _WIN32
-    set_last_error("cups_set_job_priority is not supported on Windows");
-    return false;
+    // Windows: set the spooler job priority (public 1..100 clamped to Windows 1..99).
+    (void)username;
+    (void)password;
+    return _win_set_job_priority(printer_name, job_id, priority);
 #else
     if (!printer_name)
     {
@@ -4322,11 +4801,154 @@ static char *ipp_attr_value_to_string(ipp_attribute_t *attr, int index)
 }
 #endif
 
+#ifdef _WIN32
+// --- Windows printer-attribute mapping ---
+// Windows has no IPP attribute namespace, so we translate a curated set of IPP printer
+// attribute names onto the fields of PRINTER_INFO_2. Names with no Windows equivalent
+// return NULL (reported as "not available"). This is the fixed Windows subset shared by
+// cups_get_printer_attribute(s) and cups_get_all_printer_attributes.
+static const char *WIN_CURATED_ATTR_NAMES[] = {
+    "printer-name",
+    "printer-info",
+    "printer-location",
+    "printer-make-and-model",
+    "printer-state",
+    "printer-state-reasons",
+    "printer-is-accepting-jobs",
+    "queued-job-count",
+    "device-uri",
+};
+#define WIN_CURATED_ATTR_COUNT ((int)(sizeof(WIN_CURATED_ATTR_NAMES) / sizeof(WIN_CURATED_ATTR_NAMES[0])))
+
+// Returns a freshly malloc'd value string for the given IPP attribute name derived from
+// `pi2`, or NULL if the attribute has no Windows mapping.
+static char *win_printer_attr_value(const PRINTER_INFO_2W *pi2, const char *name)
+{
+    char buf[64];
+    if (strcmp(name, "queued-job-count") == 0)
+    {
+        snprintf(buf, sizeof(buf), "%lu", (unsigned long)pi2->cJobs);
+        return strdup(buf);
+    }
+    if (strcmp(name, "printer-name") == 0)
+        return to_utf8(pi2->pPrinterName);
+    if (strcmp(name, "printer-info") == 0)
+        return to_utf8(pi2->pComment);
+    if (strcmp(name, "printer-location") == 0)
+        return to_utf8(pi2->pLocation);
+    if (strcmp(name, "printer-make-and-model") == 0)
+        return to_utf8(pi2->pDriverName);
+    if (strcmp(name, "device-uri") == 0)
+        return to_utf8(pi2->pPortName);
+    if (strcmp(name, "printer-is-accepting-jobs") == 0)
+    {
+        // Best-effort: we use WORK_OFFLINE as the Windows "reject jobs" proxy.
+        return strdup((pi2->Attributes & PRINTER_ATTRIBUTE_WORK_OFFLINE) ? "false" : "true");
+    }
+    if (strcmp(name, "printer-state") == 0)
+    {
+        // Map the Windows status bitmask onto IPP printer-state (3=idle,4=processing,5=stopped).
+        int state = 3;
+        if (pi2->Status & (PRINTER_STATUS_PRINTING | PRINTER_STATUS_PROCESSING))
+            state = 4;
+        else if (pi2->Status & (PRINTER_STATUS_PAUSED | PRINTER_STATUS_ERROR | PRINTER_STATUS_OFFLINE | PRINTER_STATUS_NOT_AVAILABLE))
+            state = 5;
+        snprintf(buf, sizeof(buf), "%d", state);
+        return strdup(buf);
+    }
+    if (strcmp(name, "printer-state-reasons") == 0)
+    {
+        const char *reason = "none";
+        if (pi2->Status & PRINTER_STATUS_PAPER_JAM)
+            reason = "media-jam-warning";
+        else if (pi2->Status & PRINTER_STATUS_PAPER_OUT)
+            reason = "media-empty-warning";
+        else if (pi2->Status & PRINTER_STATUS_TONER_LOW)
+            reason = "toner-low-warning";
+        else if (pi2->Status & PRINTER_STATUS_OUT_OF_MEMORY)
+            reason = "other";
+        else if (pi2->Status & PRINTER_STATUS_PAUSED)
+            reason = "paused";
+        else if (pi2->Status & PRINTER_STATUS_OFFLINE)
+            reason = "offline-report";
+        else if (pi2->Status & PRINTER_STATUS_ERROR)
+            reason = "other";
+        return strdup(reason);
+    }
+    return NULL; // no Windows mapping for this attribute name
+}
+
+// Fills a PrinterAttribute slot with a single string value, taking ownership of `value`.
+static void win_fill_attribute(PrinterAttribute *slot, const char *name, char *value)
+{
+    slot->attribute_name = strdup(name);
+    slot->attribute_value = value; // ownership transferred
+    slot->value_count = 1;
+    slot->array_values = NULL;
+}
+
+// GetPrinter (level 2) into a freshly malloc'd buffer. Caller frees. NULL on failure.
+static PRINTER_INFO_2W *win_get_printer_info2(const char *printer_name)
+{
+    HANDLE hPrinter = _win_open_printer(printer_name, 0);
+    if (!hPrinter)
+        return NULL;
+    DWORD needed = 0;
+    GetPrinterW(hPrinter, 2, NULL, 0, &needed);
+    if (needed == 0)
+    {
+        set_last_error("GetPrinter (size) failed for '%s'. Error: %lu", printer_name, GetLastError());
+        ClosePrinter(hPrinter);
+        return NULL;
+    }
+    PRINTER_INFO_2W *pi2 = (PRINTER_INFO_2W *)malloc(needed);
+    if (!pi2)
+    {
+        set_last_error("Out of memory querying printer '%s'.", printer_name);
+        ClosePrinter(hPrinter);
+        return NULL;
+    }
+    if (!GetPrinterW(hPrinter, 2, (LPBYTE)pi2, needed, &needed))
+    {
+        set_last_error("GetPrinter failed for '%s'. Error: %lu", printer_name, GetLastError());
+        free(pi2);
+        ClosePrinter(hPrinter);
+        return NULL;
+    }
+    ClosePrinter(hPrinter);
+    return pi2;
+}
+#endif // _WIN32
+
 FFI_PLUGIN_EXPORT PrinterAttribute *cups_get_printer_attribute(const char *printer_name, const char *attribute_name, const char *username, const char *password)
 {
 #ifdef _WIN32
-    set_last_error("cups_get_printer_attribute is not supported on Windows");
-    return NULL;
+    (void)username;
+    (void)password;
+    if (!printer_name || !attribute_name)
+    {
+        set_last_error("Printer name and attribute name are required");
+        return NULL;
+    }
+    PRINTER_INFO_2W *pi2 = win_get_printer_info2(printer_name);
+    if (!pi2)
+        return NULL;
+    char *value = win_printer_attr_value(pi2, attribute_name);
+    free(pi2);
+    if (!value)
+    {
+        set_last_error("Attribute '%s' is not available on Windows.", attribute_name);
+        return NULL;
+    }
+    PrinterAttribute *result = (PrinterAttribute *)calloc(1, sizeof(PrinterAttribute));
+    if (!result)
+    {
+        free(value);
+        set_last_error("Out of memory.");
+        return NULL;
+    }
+    win_fill_attribute(result, attribute_name, value);
+    return result;
 #else
     if (!printer_name || !attribute_name)
     {
@@ -4506,8 +5128,49 @@ FFI_PLUGIN_EXPORT PrinterAttribute *cups_get_printer_attribute(const char *print
 FFI_PLUGIN_EXPORT PrinterAttributeList *cups_get_printer_attributes(const char *printer_name, const char **attribute_names, int num_attributes, const char *username, const char *password)
 {
 #ifdef _WIN32
-    set_last_error("cups_get_printer_attributes is not supported on Windows");
-    return NULL;
+    (void)username;
+    (void)password;
+    if (!printer_name || !attribute_names || num_attributes <= 0)
+    {
+        set_last_error("Printer name and attribute names are required");
+        return NULL;
+    }
+    PRINTER_INFO_2W *pi2 = win_get_printer_info2(printer_name);
+    if (!pi2)
+        return NULL;
+    // One entry per requested name that has a Windows mapping; unmapped names are skipped.
+    PrinterAttribute *tmp = (PrinterAttribute *)calloc(num_attributes, sizeof(PrinterAttribute));
+    if (!tmp)
+    {
+        free(pi2);
+        set_last_error("Out of memory.");
+        return NULL;
+    }
+    int found = 0;
+    for (int i = 0; i < num_attributes; i++)
+    {
+        if (!attribute_names[i])
+            continue;
+        char *value = win_printer_attr_value(pi2, attribute_names[i]);
+        if (value)
+            win_fill_attribute(&tmp[found++], attribute_names[i], value);
+    }
+    free(pi2);
+    PrinterAttributeList *result = (PrinterAttributeList *)calloc(1, sizeof(PrinterAttributeList));
+    if (!result)
+    {
+        for (int i = 0; i < found; i++)
+        {
+            free(tmp[i].attribute_name);
+            free(tmp[i].attribute_value);
+        }
+        free(tmp);
+        set_last_error("Out of memory.");
+        return NULL;
+    }
+    result->count = found;
+    result->attributes = tmp; // sized num_attributes; only [0,found) populated, tail zeroed
+    return result;
 #else
     if (!printer_name || !attribute_names || num_attributes <= 0)
     {
@@ -4706,8 +5369,48 @@ FFI_PLUGIN_EXPORT PrinterAttributeList *cups_get_printer_attributes(const char *
 FFI_PLUGIN_EXPORT PrinterAttributeList *cups_get_all_printer_attributes(const char *printer_name, const char *username, const char *password)
 {
 #ifdef _WIN32
-    set_last_error("cups_get_all_printer_attributes is not supported on Windows");
-    return NULL;
+    (void)username;
+    (void)password;
+    if (!printer_name)
+    {
+        set_last_error("Printer name is required");
+        return NULL;
+    }
+    // Windows can't enumerate an IPP namespace, so "all" returns the curated, fixed
+    // subset of attributes we can map from PRINTER_INFO_2.
+    PRINTER_INFO_2W *pi2 = win_get_printer_info2(printer_name);
+    if (!pi2)
+        return NULL;
+    PrinterAttribute *tmp = (PrinterAttribute *)calloc(WIN_CURATED_ATTR_COUNT, sizeof(PrinterAttribute));
+    if (!tmp)
+    {
+        free(pi2);
+        set_last_error("Out of memory.");
+        return NULL;
+    }
+    int found = 0;
+    for (int i = 0; i < WIN_CURATED_ATTR_COUNT; i++)
+    {
+        char *value = win_printer_attr_value(pi2, WIN_CURATED_ATTR_NAMES[i]);
+        if (value)
+            win_fill_attribute(&tmp[found++], WIN_CURATED_ATTR_NAMES[i], value);
+    }
+    free(pi2);
+    PrinterAttributeList *result = (PrinterAttributeList *)calloc(1, sizeof(PrinterAttributeList));
+    if (!result)
+    {
+        for (int i = 0; i < found; i++)
+        {
+            free(tmp[i].attribute_name);
+            free(tmp[i].attribute_value);
+        }
+        free(tmp);
+        set_last_error("Out of memory.");
+        return NULL;
+    }
+    result->count = found;
+    result->attributes = tmp;
+    return result;
 #else
     (void)password;
     if (!printer_name)

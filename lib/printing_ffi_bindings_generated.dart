@@ -813,7 +813,14 @@ final class PrinterList extends ffi.Struct {
   external ffi.Pointer<PrinterInfo> printers;
 }
 
-/// Struct for returning print job information
+/// Struct for returning print job information.
+/// pages_printed / total_pages carry per-job page counts. On Windows they come from
+/// the spooler (JOB_INFO_2). On CUPS the job list does not include page counts without
+/// an extra per-job IPP query, so both are reported as -1 (unknown) there. total_pages
+/// is also -1 when unknown on Windows (the spooler reports 0 when the document has no
+/// page delimiters); pages_printed == 0 means "none yet" (or unknown if total is -1).
+/// NOTE: pages_printed / total_pages are appended at the END of this struct to keep the
+/// ABI of the existing leading fields stable.
 final class JobInfo extends ffi.Struct {
   @ffi.Uint32()
   external int id;
@@ -822,6 +829,12 @@ final class JobInfo extends ffi.Struct {
 
   @ffi.Uint32()
   external int status;
+
+  @ffi.Int32()
+  external int pages_printed;
+
+  @ffi.Int32()
+  external int total_pages;
 }
 
 final class JobList extends ffi.Struct {
