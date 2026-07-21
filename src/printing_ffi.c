@@ -11,6 +11,10 @@
 
 // 3. Platform-specific printing and system headers
 #ifdef _WIN32
+    // windows.h MUST come first: winspool.h / wingdi.h / winuser.h use base Win32 types
+    // (DWORD, LPSTR, ...) that windows.h defines. Without this the SDK's winspool.h fails
+    // to parse (error C2061: identifier 'DWORD').
+    #include <windows.h>
     #include <winspool.h>
     #include <shellapi.h>
     #include <synchapi.h>
