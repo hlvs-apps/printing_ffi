@@ -138,52 +138,60 @@ enum PrintJobStatus {
 
   /// Creates a [PrintJobStatus] from a raw platform-specific integer value.
   static PrintJobStatus fromRaw(int status) {
-    if (Platform.isMacOS || Platform.isLinux) {
-      // CUPS IPP Job States
-      return switch (status) {
-        // Map int status to PrintJobStatus enum
-        3 => PrintJobStatus.pending, // IPP_JOB_PENDING
-        4 => PrintJobStatus.held, // IPP_JOB_HELD
-        5 => PrintJobStatus.processing, // IPP_JOB_PROCESSING
-        6 => PrintJobStatus.stopped, // IPP_JOB_STOPPED
-        7 => PrintJobStatus.canceled, // IPP_JOB_CANCELED
-        8 => PrintJobStatus.aborted, // IPP_JOB_ABORTED
-        9 => PrintJobStatus.completed, // IPP_JOB_COMPLETED
-        _ => PrintJobStatus.unknown,
-      };
+    if (Platform.isMacOS || Platform.isLinux || Platform.isAndroid) {
+      return fromIpp(status);
     }
 
     if (Platform.isWindows) {
-      // Windows Job Status bit flags. The order of checks determines priority.
-      // A job can have multiple status flags, so we check from most critical to least critical.
-      // The values correspond to the JOB_STATUS_* constants in the Windows Spooler API.
-      // See: https://learn.microsoft.com/en-us/windows/win32/printdocs/job-info-2
-
-      // 1. Critical error states that halt the job.
-
-      if ((status & 2) != 0) return PrintJobStatus.error; // JOB_STATUS_ERROR (2)
-      if ((status & 1024) != 0) return PrintJobStatus.userIntervention; // JOB_STATUS_USER_INTERVENTION (1024)
-      if ((status & 64) != 0) return PrintJobStatus.paperOut; // JOB_STATUS_PAPEROUT (64)
-      if ((status & 32) != 0) return PrintJobStatus.offline; // JOB_STATUS_OFFLINE (32)
-      if ((status & 512) != 0) return PrintJobStatus.blocked; // JOB_STATUS_BLOCKED_DEVQ (512)
-
-      // 2. Terminal states (job is finished). These have priority over active states.
-      if ((status & 8192) != 0) return PrintJobStatus.retained; // JOB_STATUS_RETAINED (8192)
-      // JOB_STATUS_COMPLETE is a more definitive state than PRINTED, so check it first.
-      if ((status & 4096) != 0) return PrintJobStatus.completed; // JOB_STATUS_COMPLETE (4096)
-      if ((status & 128) != 0) return PrintJobStatus.printed; // JOB_STATUS_PRINTED (128)
-      if ((status & 256) != 0) return PrintJobStatus.canceled; // JOB_STATUS_DELETED (256)
-
-      // 3. Active/transient states (job is in progress, paused, or being managed).
-      if ((status & 4) != 0) return PrintJobStatus.deleting; // JOB_STATUS_DELETING (4)
-      if ((status & 16) != 0) return PrintJobStatus.processing; // JOB_STATUS_PRINTING (16)
-      if ((status & 8) != 0) return PrintJobStatus.spooling; // JOB_STATUS_SPOOLING (8)
-
-      // 4. Default pending state if no other flags are set.
-      if (status == 0) return PrintJobStatus.pending; // No flags, likely queued.
-
-      return PrintJobStatus.unknown;
+      return fromWindows(status);
     }
+    return PrintJobStatus.unknown;
+  }
+
+  /// The bundled Android cupsd uses the same IPP states as desktop CUPS.
+  static PrintJobStatus fromIpp(int status) {
+    // CUPS IPP Job States
+    return switch (status) {
+      // Map int status to PrintJobStatus enum
+      3 => PrintJobStatus.pending, // IPP_JOB_PENDING
+      4 => PrintJobStatus.held, // IPP_JOB_HELD
+      5 => PrintJobStatus.processing, // IPP_JOB_PROCESSING
+      6 => PrintJobStatus.stopped, // IPP_JOB_STOPPED
+      7 => PrintJobStatus.canceled, // IPP_JOB_CANCELED
+      8 => PrintJobStatus.aborted, // IPP_JOB_ABORTED
+      9 => PrintJobStatus.completed, // IPP_JOB_COMPLETED
+      _ => PrintJobStatus.unknown,
+    };
+  }
+
+  static PrintJobStatus fromWindows(int status) {
+    // Windows Job Status bit flags. The order of checks determines priority.
+    // A job can have multiple status flags, so we check from most critical to least critical.
+    // The values correspond to the JOB_STATUS_* constants in the Windows Spooler API.
+    // See: https://learn.microsoft.com/en-us/windows/win32/printdocs/job-info-2
+
+    // 1. Critical error states that halt the job.
+
+    if ((status & 2) != 0) return PrintJobStatus.error; // JOB_STATUS_ERROR (2)
+    if ((status & 1024) != 0) return PrintJobStatus.userIntervention; // JOB_STATUS_USER_INTERVENTION (1024)
+    if ((status & 64) != 0) return PrintJobStatus.paperOut; // JOB_STATUS_PAPEROUT (64)
+    if ((status & 32) != 0) return PrintJobStatus.offline; // JOB_STATUS_OFFLINE (32)
+    if ((status & 512) != 0) return PrintJobStatus.blocked; // JOB_STATUS_BLOCKED_DEVQ (512)
+
+    // 2. Terminal states (job is finished). These have priority over active states.
+    if ((status & 8192) != 0) return PrintJobStatus.retained; // JOB_STATUS_RETAINED (8192)
+    // JOB_STATUS_COMPLETE is a more definitive state than PRINTED, so check it first.
+    if ((status & 4096) != 0) return PrintJobStatus.completed; // JOB_STATUS_COMPLETE (4096)
+    if ((status & 128) != 0) return PrintJobStatus.printed; // JOB_STATUS_PRINTED (128)
+    if ((status & 256) != 0) return PrintJobStatus.canceled; // JOB_STATUS_DELETED (256)
+
+    // 3. Active/transient states (job is in progress, paused, or being managed).
+    if ((status & 4) != 0) return PrintJobStatus.deleting; // JOB_STATUS_DELETING (4)
+    if ((status & 16) != 0) return PrintJobStatus.processing; // JOB_STATUS_PRINTING (16)
+    if ((status & 8) != 0) return PrintJobStatus.spooling; // JOB_STATUS_SPOOLING (8)
+
+    // 4. Default pending state if no other flags are set.
+    if (status == 0) return PrintJobStatus.pending; // No flags, likely queued.
 
     return PrintJobStatus.unknown;
   }
