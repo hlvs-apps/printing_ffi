@@ -1,3 +1,7 @@
+## 0.1.1
+
+* Map Android bundled CUPS jobs using IPP states, including completion and cancellation.
+
 ## 0.1.0
 
 * ✨ **FEAT(android)**: Android is now a supported platform. The plugin bundles a private CUPS server (for network/office IPP printing) and DNP/Citizen dye-sub USB auto-detect, cross-compiled from source (CUPS + Gutenprint + libusb) during the app's Gradle build — no prebuilt binaries are shipped. 📱🖨️
