@@ -37,7 +37,11 @@ settings live under the app's Library/printing_ffi directory. The scheduler
 holds an exclusive spool lock and exits when its owning app process exits,
 preventing an orphan and a new app launch from processing the same jobs. All Dart worker
 threads select the current app-owned port before native operations, including
-after a scheduler restart. The CUPS web settings use the same bundled server.
+after a scheduler restart. The CUPS web settings use the same bundled server. Consuming apps need an
+`NSAppTransportSecurity` → `NSExceptionDomains` → `127.0.0.1` dictionary with
+`NSExceptionAllowsInsecureHTTPLoads: true` for the WebView on iOS 17 and later.
+The example and booth app include this loopback-only exception; they do not
+enable arbitrary network loads. See [Apple's local networking documentation](https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity/nsallowslocalnetworking).
 
 ## Building and validation
 

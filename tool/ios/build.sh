@@ -94,6 +94,10 @@ p=Path(sys.argv[2])/'bin/cups-config'
 p.parent.mkdir(exist_ok=True)
 s=Path(sys.argv[1]).read_text().replace('@STAGED_CUPS@',sys.argv[2])
 s=s.replace('CUPS_DEP_LIBS="-lz -lm"','CUPS_DEP_LIBS="-lz -lm -framework CoreFoundation -framework Security -framework SystemConfiguration"')
+# Only static archives exist in STAGE. Use -l references so Darwin libtool
+# records dependencies instead of nesting .a files inside libcupsfilters.a.
+s=s.replace('$libdir/libcupsimage.a $libdir/libcups.a', '-L$libdir -lcupsimage -lcups')
+s=s.replace('$libdir/libcups.a', '-L$libdir -lcups')
 p.write_text(s); p.chmod(0o755)
 PY
 cmake -S "$BUILD/jpeg" -B "$BUILD/jpeg-build" -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_SYSTEM_PROCESSOR=arm64 -DCMAKE_OSX_SYSROOT="$SDK" \
