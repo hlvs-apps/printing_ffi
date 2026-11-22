@@ -81,7 +81,9 @@ ln -sfn "$MACSDK/System/Library/Frameworks/IOKit.framework/Headers" "$BUILD/usb-
   make -C scheduler -j"$JOBS" cupsd cups-exec cups-deviced cups-driverd
   make -C cgi-bin -j"$JOBS" all
   for directory in cups data doc templates locale; do
-    make -C "$directory" install DSTROOT="$BUILD/cups-install"
+    # Xcode exports SYMROOT; CUPS' install rule would try to create dSYMs
+    # from these static archives. The plugin framework owns its debug symbols.
+    make -C "$directory" install DSTROOT="$BUILD/cups-install" SYMROOT=
   done
 )
 cp -R "$BUILD/cups-install/cups/include/." "$STAGE/include/"
