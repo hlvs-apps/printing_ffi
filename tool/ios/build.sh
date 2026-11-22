@@ -93,7 +93,7 @@ s=Path(sys.argv[1]).read_text().replace('@STAGED_CUPS@',sys.argv[2])
 s=s.replace('CUPS_DEP_LIBS="-lz -lm"','CUPS_DEP_LIBS="-lz -lm -framework CoreFoundation -framework Security -framework SystemConfiguration"')
 p.write_text(s); p.chmod(0o755)
 PY
-cmake -S "$BUILD/jpeg" -B "$BUILD/jpeg-build" -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT="$SDK" \
+cmake -S "$BUILD/jpeg" -B "$BUILD/jpeg-build" -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_SYSTEM_PROCESSOR=arm64 -DCMAKE_OSX_SYSROOT="$SDK" \
   -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET="$IOS_MIN" -DCMAKE_INSTALL_PREFIX="$STAGE" \
   -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=OFF -DWITH_TOOLS=OFF -DWITH_TESTS=OFF
 cmake --build "$BUILD/jpeg-build" --parallel "$JOBS"

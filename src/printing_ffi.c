@@ -2727,7 +2727,7 @@ FFI_PLUGIN_EXPORT JobList *get_print_jobs(const char *printer_name)
     ClosePrinter(hPrinter);
     return list;
 #else // macOS / Linux
-    cups_job_t *jobs;
+    cups_job_t *jobs = NULL;
     // Query ALL users' jobs (my_jobs = 0), not only the querying CUPS user's.
     // The host app may run as a root daemon whose CUPS user does not match the
     // job's recorded owner; with my_jobs = 1 those jobs are invisible, so a
@@ -2737,6 +2737,15 @@ FFI_PLUGIN_EXPORT JobList *get_print_jobs(const char *printer_name)
     // `completed` state instead of having it silently vanish from the list.
     // Safe: callers already filter the returned list by their own job title.
     int num_jobs = cupsGetJobs(&jobs, printer_name, 0, CUPS_WHICHJOBS_ALL);
+#ifdef PRINTING_FFI_IOS
+    // A scheduler failure must not look like an empty durable job history.
+    if (num_jobs < 0 || cupsLastError() >= IPP_STATUS_ERROR_BAD_REQUEST) {
+        set_last_error("CUPS job history unavailable: %s", cupsLastErrorString());
+        if (num_jobs > 0) cupsFreeJobs(num_jobs, jobs);
+        free(list);
+        return NULL;
+    }
+#endif
     if (num_jobs <= 0)
     {
         cupsFreeJobs(num_jobs, jobs);

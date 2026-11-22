@@ -30,5 +30,7 @@ int main(int argc, char **argv) {
     stop_cups_server();
     assert(!printing_ffi_ios_running());
     stop_cups_server();
+    printing_ffi_ios_select_server();
+    assert(get_print_jobs("DNP") == NULL);
     puts("PASS: missing helper, startup, reuse, IPP enumeration, shutdown/reap");
 }

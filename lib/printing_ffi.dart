@@ -2109,6 +2109,9 @@ void _helperIsolateEntryPoint(SendPort sendPort) {
             final namePtr = data.printerName.toNativeUtf8();
             try {
               final jobListPtr = bindings.get_print_jobs(namePtr.cast());
+              if (Platform.isIOS && jobListPtr == nullptr) {
+                throw PrintingFfiException(getLastError().toDartString());
+              }
               final jobs = <PrintJob>[];
               if (jobListPtr != nullptr) {
                 try {
