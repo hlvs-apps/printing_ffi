@@ -78,6 +78,15 @@ def patch(root):
         'IOServiceAuthorize (dpriv->service, kIOServiceInteractionAllowed)',
         'kIOReturnUnsupported /* macOS authorization UI is unavailable on iOS */')
     p.write_text(s)
+    # This package builds only imagetoraster, not the driverless PPD generator.
+    # Its private CUPS compatibility copies collide with static libcups on
+    # Darwin (which searches archives repeatedly). Use libcups' own functions.
+    p = root / 'filters/Makefile.in'
+    s = p.read_text()
+    objects = [line for line in s.splitlines(keepends=True)
+               if line.startswith('\tcupsfilters/libcupsfilters_la-ppdgenerator.lo ')]
+    assert len(objects) == 1, 'cups-filters object list changed'
+    p.write_text(s.replace(objects[0], '', 1))
     # Do not run an iOS extract-strings binary on the build host. The source
     # distribution already includes this header; translations are disabled.
     p = root / 'gutenprint/src/xml/Makefile.in'
