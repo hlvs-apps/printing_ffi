@@ -35,7 +35,7 @@
 #endif
 
 // Android-specific headers for the bundled cupsd launcher (start/stop server).
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(PRINTING_FFI_IOS)
     #include <sys/types.h>
     #include <sys/stat.h>
     #include <sys/socket.h>
@@ -45,10 +45,17 @@
     #include <fcntl.h>
     #include <signal.h>
     #include <errno.h>
+    #ifdef PRINTING_FFI_IOS
+    #include <spawn.h>
+    extern char **environ;
+    #undef LOG
+    #define LOG(...) do { fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } while (0)
+    #else
     #include <android/log.h>
     #undef LOG
     #define ANDROID_LOG_TAG "PrintingFfiCups"
     #define LOG(...) __android_log_print(ANDROID_LOG_INFO, ANDROID_LOG_TAG, __VA_ARGS__)
+    #endif
 #endif
 
 // 5. PDFium headers (only for Windows implementation)
@@ -1453,14 +1460,27 @@ FFI_PLUGIN_EXPORT const char *get_last_error()
 // ============================================================================
 // Android: bundled cupsd scheduler (runs inside the app sandbox at the app uid)
 // ============================================================================
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(PRINTING_FFI_IOS)
 
 #include <sys/un.h>
 
 // PID of the cupsd child we forked. 0 = not running.
 static pid_t g_cupsd_pid = 0;
 // The localhost port cupsd is listening on (chosen at start time).
+#ifdef PRINTING_FFI_IOS
+#include <stdatomic.h>
+static _Atomic int g_cupsd_port = 0;
+// libcups keeps its server per thread. Dart worker threads can outlive cupsd.
+FFI_PLUGIN_EXPORT void printing_ffi_ios_select_server(void) {
+    int port = atomic_load(&g_cupsd_port);
+    char server[64];
+    // Never fall back to a system CUPS endpoint when the optional runtime stops.
+    snprintf(server, sizeof(server), "127.0.0.1:%d", port > 0 ? port : 1);
+    cupsSetServer(server);
+}
+#else
 static int g_cupsd_port = 0;
+#endif
 // The canonical USB-fd AF_UNIX socket path (<server_root>/usbfd.sock), filled by
 // start_cups_server. Empty until then. Both start_usb_fd_server (via the caller)
 // and the backend's PRINTING_FFI_USB_FD_SOCK env line derive from this.
@@ -1718,6 +1738,13 @@ static int generate_dnp_ppd(const char *native_lib_dir, const char *ppddir,
         return -1;
     }
 
+#ifdef PRINTING_FFI_IOS
+    setenv("STP_DATA_PATH", stp_data_path, 1);
+    pid_t pid;
+    char *const argv[] = {genppd_bin, "-p", (char *)ppddir, "-Z", (char *)driver, NULL};
+    int spawn_error = posix_spawn(&pid, genppd_bin, NULL, NULL, argv, environ);
+    if (spawn_error != 0) { errno = spawn_error; return -1; }
+#else
     pid_t pid = fork();
     if (pid < 0)
     {
@@ -1739,12 +1766,24 @@ static int generate_dnp_ppd(const char *native_lib_dir, const char *ppddir,
         _exit(127);
     }
 
+#endif
+
     int status = 0;
+#ifdef PRINTING_FFI_IOS
+    pid_t completed = 0;
+    for (int i = 0; i < 100 && completed == 0; ++i) {
+        completed = waitpid(pid, &status, WNOHANG);
+        if (completed == 0) usleep(100000);
+    }
+    if (completed == 0) { kill(pid, SIGKILL); waitpid(pid, &status, 0); return -1; }
+    if (completed != pid) return -1;
+#else
     if (waitpid(pid, &status, 0) != pid)
     {
         LOG("generate_dnp_ppd: waitpid failed: %s", strerror(errno));
         return -1;
     }
+ #endif
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
     {
         LOG("generate_dnp_ppd: cups-genppd exited abnormally (status=%d) for driver %s", status, driver);
@@ -1776,7 +1815,9 @@ FFI_PLUGIN_EXPORT int32_t start_cups_server(const char *server_root, const char 
         if (waitpid(g_cupsd_pid, &status, WNOHANG) == 0)
         {
             LOG("cupsd already running (pid %d, port %d)", (int)g_cupsd_pid, g_cupsd_port);
-            cupsSetServer("127.0.0.1");
+            char hostport[64];
+            snprintf(hostport, sizeof(hostport), "127.0.0.1:%d", g_cupsd_port);
+            cupsSetServer(hostport);
             return g_cupsd_port;
         }
         g_cupsd_pid = 0;
@@ -1916,7 +1957,7 @@ FFI_PLUGIN_EXPORT int32_t start_cups_server(const char *server_root, const char 
     char files_conf_path[PATH_MAX];
     snprintf(files_conf_path, sizeof(files_conf_path), "%s/cups-files.conf", serverroot);
     {
-        char buf[4096];
+        char buf[PATH_MAX * 20];
         snprintf(buf, sizeof(buf),
                  "User #%d\n"
                  "Group #%d\n"
@@ -2001,6 +2042,15 @@ FFI_PLUGIN_EXPORT int32_t start_cups_server(const char *server_root, const char 
     }
 
     // --- fork + execv cupsd in the foreground (-f) ---
+#ifdef PRINTING_FFI_IOS
+    pid_t pid;
+    char *const argv[] = {cupsd_bin, "-f", "-c", cupsd_conf_path, "-s", files_conf_path, NULL};
+    int spawn_error = posix_spawn(&pid, cupsd_bin, NULL, NULL, argv, environ);
+    if (spawn_error != 0) {
+        set_last_error("CUPS execution unavailable: %s", strerror(spawn_error));
+        return -7;
+    }
+#else
     pid_t pid = fork();
     if (pid < 0)
     {
@@ -2021,6 +2071,8 @@ FFI_PLUGIN_EXPORT int32_t start_cups_server(const char *server_root, const char 
         _exit(127);
     }
 
+#endif
+
     // Parent.
     g_cupsd_pid = pid;
     g_cupsd_port = port;
@@ -2033,7 +2085,10 @@ FFI_PLUGIN_EXPORT int32_t start_cups_server(const char *server_root, const char 
         // Try to clean up if it's still around.
         if (g_cupsd_pid > 0)
         {
-            kill(g_cupsd_pid, SIGTERM);
+            kill(g_cupsd_pid, SIGKILL);
+            waitpid(g_cupsd_pid, NULL, 0);
+            g_cupsd_pid = 0;
+            g_cupsd_port = 0;
         }
         return -8;
     }
@@ -2084,6 +2139,7 @@ FFI_PLUGIN_EXPORT void stop_cups_server(void)
 // Hands the app's live USB fd to the forked DNP backend over an AF_UNIX socket
 // via SCM_RIGHTS. See the header for the full contract.
 
+#ifdef __ANDROID__
 // Server state (single active server at a time — one printer).
 // NOTE: Android's bionic has NO pthread cancellation (pthread_cancel etc. are
 // absent), so clean shutdown is done by g_usbfd_stop + closing the listen fd,
@@ -2294,6 +2350,24 @@ FFI_PLUGIN_EXPORT const char *cups_usb_fd_sock_path(void)
 {
     return g_usb_fd_sock_path[0] ? g_usb_fd_sock_path : NULL;
 }
+
+#else
+FFI_PLUGIN_EXPORT int start_usb_fd_server(const char *path, int fd) {
+    (void)path; (void)fd; return -1;
+}
+FFI_PLUGIN_EXPORT void stop_usb_fd_server(void) {}
+FFI_PLUGIN_EXPORT const char *cups_usb_fd_sock_path(void) { return NULL; }
+
+// Called only on the iOS plugin's serial worker queue.
+int printing_ffi_ios_running(void) {
+    if (g_cupsd_pid <= 0) return 0;
+    int status;
+    if (waitpid(g_cupsd_pid, &status, WNOHANG) == 0) return 1;
+    g_cupsd_pid = 0;
+    g_cupsd_port = 0;
+    return 0;
+}
+#endif
 
 // generate_cups_dnp_ppd: generate (if not already present) a Gutenprint PPD for a
 // specific DNP/Citizen dye-sub driver and return its ABSOLUTE on-device path, so the
@@ -2653,7 +2727,7 @@ FFI_PLUGIN_EXPORT JobList *get_print_jobs(const char *printer_name)
     ClosePrinter(hPrinter);
     return list;
 #else // macOS / Linux
-    cups_job_t *jobs;
+    cups_job_t *jobs = NULL;
     // Query ALL users' jobs (my_jobs = 0), not only the querying CUPS user's.
     // The host app may run as a root daemon whose CUPS user does not match the
     // job's recorded owner; with my_jobs = 1 those jobs are invisible, so a
@@ -2663,6 +2737,15 @@ FFI_PLUGIN_EXPORT JobList *get_print_jobs(const char *printer_name)
     // `completed` state instead of having it silently vanish from the list.
     // Safe: callers already filter the returned list by their own job title.
     int num_jobs = cupsGetJobs(&jobs, printer_name, 0, CUPS_WHICHJOBS_ALL);
+#ifdef PRINTING_FFI_IOS
+    // A scheduler failure must not look like an empty durable job history.
+    if (num_jobs < 0 || cupsLastError() >= IPP_STATUS_ERROR_BAD_REQUEST) {
+        set_last_error("CUPS job history unavailable: %s", cupsLastErrorString());
+        if (num_jobs > 0) cupsFreeJobs(num_jobs, jobs);
+        free(list);
+        return NULL;
+    }
+#endif
     if (num_jobs <= 0)
     {
         cupsFreeJobs(num_jobs, jobs);
@@ -2818,12 +2901,12 @@ FFI_PLUGIN_EXPORT int open_printer_properties(const char *printer_name, intptr_t
     ClosePrinter(hPrinter);
     free(printer_name_w);
     return return_status;
-#elif defined(__ANDROID__)
+#elif defined(__ANDROID__) || defined(PRINTING_FFI_IOS)
     // No xdg-open / desktop browser on Android. The CUPS web interface is also
     // disabled in the bundled cupsd config. Not supported here.
     (void)hwnd;
     (void)printer_name;
-    LOG("open_printer_properties is not supported on Android");
+    LOG("Use the in-app CUPS settings on mobile");
     return 0; // Error / unsupported
 #else
     (void)hwnd; // hwnd is Windows-specific
@@ -3597,6 +3680,11 @@ FFI_PLUGIN_EXPORT bool print_file_with_dialog(const char *file_path, const char 
         set_last_error("ShellExecuteW failed to print file. Error code: %d. Ensure a default application is set for this file type.", (int)(intptr_t)result);
         return false;
     }
+#elif defined(PRINTING_FFI_IOS)
+    (void)file_path;
+    (void)doc_name;
+    set_last_error("Use the app's CUPS print queue on iOS");
+    return false;
 #else // macOS / Linux
 #ifdef __APPLE__
     // On macOS, use lpr to print the file.

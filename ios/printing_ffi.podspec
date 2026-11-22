@@ -20,9 +20,23 @@ A Flutter plugin for direct printer communication using native FFI bindings for 
   s.source           = { :path => '.' }
   s.source_files = 'Classes/**/*'
   s.dependency 'Flutter'
-  s.platform = :ios, '13.0'
+  s.platform = :ios, '14.0'
 
-  # Flutter.framework does not contain a i386 slice.
-  s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES', 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386' }
-  s.swift_version = '5.0'
+  s.resources = 'Resources/CupsRuntime.bundle'
+  s.frameworks = 'Foundation', 'CoreFoundation', 'Security', 'SystemConfiguration'
+  s.libraries = 'z', 'iconv', 'resolv'
+  stage = '$(PODS_TARGET_SRCROOT)/.build/arm64'
+  s.script_phase = {
+    :name => 'Build bundled iOS CUPS and DNP drivers',
+    :script => 'bash "${PODS_TARGET_SRCROOT}/../tool/ios/build.sh"',
+    :execution_position => :before_compile,
+  }
+  s.pod_target_xcconfig = {
+    'DEFINES_MODULE' => 'YES',
+    'SUPPORTED_PLATFORMS' => 'iphoneos',
+    'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) PRINTING_FFI_IOS=1 _DARWIN_C_SOURCE=1',
+    'HEADER_SEARCH_PATHS' => "$(inherited) #{stage}/include",
+    'LIBRARY_SEARCH_PATHS' => "$(inherited) #{stage}/lib",
+    'OTHER_LDFLAGS' => '$(inherited) -lcups -lcupsimage',
+  }
 end

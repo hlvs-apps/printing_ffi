@@ -34,7 +34,7 @@ A Flutter plugin for direct printer communication using native FFI (Foreign Func
 | 🪟 Windows |   ✅ Supported   | Uses native `winspool` API.          |
 | 🐧 Linux   |   ✅ Supported   | Requires CUPS development libraries. |
 | 🤖 Android | ✅ Supported | Bundles a CUPS server (built from source) for IPP printing + DNP/Citizen dye-sub USB auto-detect. See [docs/android-migration-guide.md](docs/android-migration-guide.md). |
-| 📱 iOS     | ❌ Not Supported | -                                    |
+| 📱 iOS     | Optional bundled CUPS | USB access required; [device build and validation](docs/ios.md) |
 
 ## `printing_ffi` vs. `package:printing`
 
