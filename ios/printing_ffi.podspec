@@ -24,7 +24,7 @@ A Flutter plugin for direct printer communication using native FFI bindings for 
 
   s.resources = 'Resources/CupsRuntime.bundle'
   s.frameworks = 'Foundation', 'CoreFoundation', 'Security', 'SystemConfiguration'
-  s.libraries = 'z', 'iconv'
+  s.libraries = 'z', 'iconv', 'resolv'
   stage = '$(PODS_TARGET_SRCROOT)/.build/arm64'
   s.script_phase = {
     :name => 'Build bundled iOS CUPS and DNP drivers',

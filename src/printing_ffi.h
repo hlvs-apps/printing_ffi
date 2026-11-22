@@ -16,7 +16,11 @@ extern "C"
 #else
 #include <pthread.h>
 #include <unistd.h>
+#ifdef PRINTING_FFI_IOS
+#define FFI_PLUGIN_EXPORT __attribute__((visibility("default"), used))
+#else
 #define FFI_PLUGIN_EXPORT __attribute__((visibility("default")))
+#endif
 #endif
 
     // Struct for returning printer information

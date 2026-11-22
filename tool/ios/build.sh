@@ -18,7 +18,7 @@ RUNTIME="$PLUGIN/ios/Resources/CupsRuntime.bundle"
 CACHE="${PRINTING_IOS_CACHE:-$HOME/Library/Caches/printing_ffi-ios}"
 mkdir -p "$CACHE/downloads" "$STAGE" "$RUNTIME"
 # Include build logic and SDK identity in the cache. Never reuse Android objects.
-KEY=$( { cat "$0" "$TASK_DIR/patch_sources.py" "$TASK_DIR/helper.entitlements" "$PLUGIN/tool/android/gutenprint/cups-config-android.in" "$PLUGIN/tool/android/cupsfilters/imagetoraster.convs"; printf '%s\n' "$SDK" "$IOS_MIN"; } | shasum -a 256 | cut -d' ' -f1)
+KEY=$( { cat "$0" "$TASK_DIR/patch_sources.py" "$TASK_DIR/helper.entitlements" "$PLUGIN/tool/android/cupsfilters/imagetoraster.convs"; printf '%s\n' "$SDK" "$IOS_MIN"; } | shasum -a 256 | cut -d' ' -f1)
 if [[ -f "$STAGE/complete" && $(cat "$STAGE/complete") == "$KEY" && -f "$RUNTIME/bin/libcupsd.so" ]]; then exit 0; fi
 BUILD="$CACHE/$KEY"
 mkdir -p "$BUILD" "$BUILD/usb-headers"
@@ -86,20 +86,22 @@ ln -sfn "$MACSDK/System/Library/Frameworks/IOKit.framework/Headers" "$BUILD/usb-
 )
 cp -R "$BUILD/cups-install/cups/include/." "$STAGE/include/"
 cp "$BUILD/cups/cups/libcups.a" "$BUILD/cups/cups/libcupsimage.a" "$STAGE/lib/"
-# Reuse the cross cups-config contract, with Darwin's libcups dependencies.
-python3 - "$PLUGIN/tool/android/gutenprint/cups-config-android.in" "$STAGE" <<'PY'
+# Retain CUPS' actual configured transitive libraries (iconv, resolv, etc.).
+# Relocate its include/library paths and use -l so Darwin libtool does not nest
+# complete archives inside libcupsfilters.a.
+python3 - "$BUILD/cups/cups-config" "$STAGE" <<'PYCONFIG'
 from pathlib import Path
+import re
 import sys
 p=Path(sys.argv[2])/'bin/cups-config'
 p.parent.mkdir(exist_ok=True)
-s=Path(sys.argv[1]).read_text().replace('@STAGED_CUPS@',sys.argv[2])
-s=s.replace('CUPS_DEP_LIBS="-lz -lm"','CUPS_DEP_LIBS="-lz -lm -framework CoreFoundation -framework Security -framework SystemConfiguration"')
-# Only static archives exist in STAGE. Use -l references so Darwin libtool
-# records dependencies instead of nesting .a files inside libcupsfilters.a.
-s=s.replace('$libdir/libcupsimage.a $libdir/libcups.a', '-L$libdir -lcupsimage -lcups')
-s=s.replace('$libdir/libcups.a', '-L$libdir -lcups')
+s=Path(sys.argv[1]).read_text()
+for key, value in [('includedir', sys.argv[2]+'/include'), ('libdir', sys.argv[2]+'/lib')]:
+    s=re.sub(r'^'+key+r'=.*$', key+'="'+value+'"', s, flags=re.M)
+s=re.sub(r'libs="[^"\n]*";', 'libs="-L$libdir -lcups $LIBS";', s)
 p.write_text(s); p.chmod(0o755)
-PY
+PYCONFIG
+
 cmake -S "$BUILD/jpeg" -B "$BUILD/jpeg-build" -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_SYSTEM_PROCESSOR=arm64 -DCMAKE_OSX_SYSROOT="$SDK" \
   -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET="$IOS_MIN" -DCMAKE_INSTALL_PREFIX="$STAGE" \
   -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=OFF -DWITH_TOOLS=OFF -DWITH_TESTS=OFF

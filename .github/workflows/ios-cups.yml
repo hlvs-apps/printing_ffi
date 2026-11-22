@@ -28,3 +28,5 @@ jobs:
       - name: Build device example with bundled printing runtime
         working-directory: example
         run: flutter build ios --release --no-codesign
+      - name: Verify FFI exports and bundled runtime
+        run: python3 tool/ios/check_bundle.py example/build/ios/iphoneos/Runner.app
