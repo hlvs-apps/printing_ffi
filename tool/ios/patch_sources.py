@@ -23,6 +23,19 @@ def patch(root):
     begin = s.index('  if (!fg)\n', s.index('* Run in the background as needed'))
     end = s.index('  cupsdSetBusyState(1);', begin)
     s = s[:begin] + '  if (!fg) return (1); /* iOS requires -f */\n\n' + s[end:]
+    # Tie the scheduler to its app and prevent two app launches from consuming
+    # the same durable spool. The lock survives app death until cupsd exits.
+    s = '#include <sys/file.h>\n' + s
+    s = s.replace('  struct rlimit\t\tlimit;',
+                  '  const pid_t printing_owner = getppid();\n  int printing_lock;\n  char printing_lock_path[1024];\n  struct rlimit\t\tlimit;', 1)
+    s = s.replace('  cupsdStartServer();', """  snprintf(printing_lock_path, sizeof(printing_lock_path), "%s/printing_ffi.lock", StateDir);
+  printing_lock = open(printing_lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+  if (printing_lock < 0 || flock(printing_lock, LOCK_EX | LOCK_NB)) return (1);
+  cupsdStartServer();""", 1)
+    s = s.replace('  while (!stop_scheduler)\n  {',
+                  '  while (!stop_scheduler)\n  {\n    if (getppid() != printing_owner) break;', 1)
+    s = s.replace('(timeout = select_timeout(fds)) > 1 && LastEvent',
+                  '(timeout = select_timeout(fds)) > 1')
     p.write_text(s)
     p = root / 'cups/scheduler/util.c'
     s = p.read_text()
@@ -55,6 +68,12 @@ def patch(root):
                   'MAC_OS_X_VERSION_MAX_ALLOWED >= 101000',
                   'MAC_OS_X_VERSION_MAX_ALLOWED >= 101200'):
         s = s.replace('#if ' + check, '#if 1')
+    p.write_text(s)
+    # iOS has no macOS authorization UI. Normal USB open/claim still probes the
+    # caller's actual access; a kernel-owned device cannot use this desktop path.
+    s = p.read_text().replace(
+        'IOServiceAuthorize (dpriv->service, kIOServiceInteractionAllowed)',
+        'kIOReturnUnsupported /* macOS authorization UI is unavailable on iOS */')
     p.write_text(s)
     # Do not run an iOS extract-strings binary on the build host. The source
     # distribution already includes this header; translations are disabled.

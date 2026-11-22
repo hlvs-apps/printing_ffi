@@ -54,7 +54,7 @@ python3 "$TASK_DIR/patch_sources.py" "$BUILD"
 ln -sfn "$MACSDK/System/Library/Frameworks/IOKit.framework/Headers" "$BUILD/usb-headers/IOKit"
 (
   cd "$BUILD/usb"
-  CPPFLAGS="-I$BUILD/usb-headers" ./configure --host=aarch64-apple-darwin --prefix="$STAGE" --disable-shared --enable-static
+  CPPFLAGS="-isystem $BUILD/usb-headers" ./configure --host=aarch64-apple-darwin --prefix="$STAGE" --disable-shared --enable-static
   make -j"$JOBS"
   make install
 )

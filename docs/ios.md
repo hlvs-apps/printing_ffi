@@ -33,7 +33,9 @@ added to Runner. For a jailbreak deployment, sign/trust **all** executables unde
 build signatures are not a claim that a particular jailbreak will trust them.
 
 CUPS listens only on an ephemeral loopback port. Config, spool and printer
-settings live under the app's Library/printing_ffi directory. All Dart worker
+settings live under the app's Library/printing_ffi directory. The scheduler
+holds an exclusive spool lock and exits when its owning app process exits,
+preventing an orphan and a new app launch from processing the same jobs. All Dart worker
 threads select the current app-owned port before native operations, including
 after a scheduler restart. The CUPS web settings use the same bundled server.
 

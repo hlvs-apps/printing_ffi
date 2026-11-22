@@ -8,7 +8,7 @@
 extern int printing_ffi_ios_running(void);
 extern void printing_ffi_ios_select_server(void);
 int main(int argc, char **argv) {
-    assert(argc == 4);
+    assert(argc == 4 || argc == 5);
     assert(!printing_ffi_ios_running());
     assert(start_cups_server(argv[3], "/missing/printing-ffi", argv[2], "") < 0);
     assert(!printing_ffi_ios_running());
@@ -21,6 +21,12 @@ int main(int argc, char **argv) {
     assert(printers != NULL);
     assert(printers->count == 0);
     free_printer_list(printers);
+    if (argc == 5) {
+        printf("READY %d\n", port);
+        fflush(stdout);
+        getchar(); // Test harness closes stdin to simulate app termination.
+        return 0;
+    }
     stop_cups_server();
     assert(!printing_ffi_ios_running());
     stop_cups_server();
