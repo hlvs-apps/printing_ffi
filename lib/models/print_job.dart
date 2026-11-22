@@ -138,7 +138,7 @@ enum PrintJobStatus {
 
   /// Creates a [PrintJobStatus] from a raw platform-specific integer value.
   static PrintJobStatus fromRaw(int status) {
-    if (Platform.isMacOS || Platform.isLinux || Platform.isAndroid) {
+    if (Platform.isMacOS || Platform.isLinux || Platform.isAndroid || Platform.isIOS) {
       return fromIpp(status);
     }
 
@@ -148,7 +148,7 @@ enum PrintJobStatus {
     return PrintJobStatus.unknown;
   }
 
-  /// The bundled Android cupsd uses the same IPP states as desktop CUPS.
+  /// Bundled Android/iOS cupsd uses the same IPP states as desktop CUPS.
   static PrintJobStatus fromIpp(int status) {
     // CUPS IPP Job States
     return switch (status) {

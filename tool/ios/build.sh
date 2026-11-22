@@ -150,7 +150,7 @@ PC
   # the in-app print path. Build exactly the driver/filter/PPD programs we ship.
   make -C src/cups -j"$JOBS" backend_gutenprint rastertogutenprint.5.3 commandtodyesub cups-genppd.5.3
 )
-mkdir -p "$RUNTIME/bin" "$RUNTIME/share/cups" "$RUNTIME/share/doc/cups" "$RUNTIME/share/gutenprint/5.3/xml" "$RUNTIME/licenses"
+mkdir -p "$RUNTIME/bin" "$RUNTIME/share/cups/mime" "$RUNTIME/share/doc/cups" "$RUNTIME/share/gutenprint/5.3/xml" "$RUNTIME/licenses"
 copybin() { cp "$1" "$RUNTIME/bin/$2"; chmod 755 "$RUNTIME/bin/$2"; }
 copybin "$BUILD/cups/scheduler/cupsd" libcupsd.so
 for name in cups-deviced cups-driverd cups-exec; do copybin "$BUILD/cups/scheduler/$name" "libcupsd_$name.so"; done
@@ -165,6 +165,7 @@ cp -R "$BUILD/cups-install/cups/share/doc/cups/." "$RUNTIME/share/doc/cups/"
 cp -R "$BUILD/gutenprint/src/xml/." "$RUNTIME/share/gutenprint/5.3/xml/"
 # Only runtime XML data; build products never enter the app as resources.
 find "$RUNTIME/share/gutenprint/5.3/xml" -type f ! -name '*.xml' ! -name 'xml-stamp' -delete
+cp "$BUILD/cups/conf/mime.types" "$BUILD/cups/conf/mime.convs" "$RUNTIME/share/cups/mime/"
 cp "$PLUGIN/tool/android/cupsfilters/imagetoraster.convs" "$RUNTIME/share/cups/mime/"
 for name in cups usb jpeg png filters gutenprint; do
   for license in COPYING LICENSE LICENSE.md LICENSE.txt; do

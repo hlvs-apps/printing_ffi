@@ -16,6 +16,7 @@ for relative in (
     'bin/libcupsd.so', 'bin/libcupsbe_gutenprint53usb.so',
     'bin/libcupsf_imagetoraster.so', 'bin/libcupsf_rastertogutenprint.so',
     'bin/libcupstool_gutenprint_genppd.so', 'bin/libcupscgi_admin.so',
+    'share/cups/mime/mime.types', 'share/cups/mime/mime.convs',
     'share/cups/mime/imagetoraster.convs',
     'share/gutenprint/5.3/xml/printers/dyesub.xml',
 ):
