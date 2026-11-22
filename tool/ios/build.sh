@@ -60,6 +60,10 @@ ln -sfn "$MACSDK/System/Library/Frameworks/IOKit.framework/Headers" "$BUILD/usb-
 )
 (
   cd "$BUILD/cups"
+  ac_cv_func_SCDynamicStoreCopyComputerName=no \
+  ac_cv_header_CoreFoundation_CoreFoundation_h=no \
+  ac_cv_header_ApplicationServices_ApplicationServices_h=no \
+  ac_cv_header_Security_Authorization_h=no \
   ./configure --host=aarch64-apple-darwin --prefix=/cups --disable-shared --enable-static \
     --with-tls=no --with-dnssd=no --with-ondemand=no --disable-pam --disable-dbus \
     --disable-libusb --disable-gssapi --without-rcdir --with-components=all --with-docdir=/cups/share/doc/cups --datadir=/cups/share

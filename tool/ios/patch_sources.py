@@ -1,6 +1,7 @@
 """Adapt pinned upstream sources for iOS, without Android compatibility shims."""
 from pathlib import Path
 import sys
+import re
 
 
 def patch(root):
@@ -10,10 +11,12 @@ def patch(root):
     # CUPS' macOS integrations use desktop-only Security/IOKit/sandbox APIs.
     # Keep its portable POSIX/IPP implementation and posix_spawn scheduler.
     for p in (root / 'cups').rglob('*'):
-        if p.suffix not in ('.c', '.h'):
+        if p.suffix not in ('.c', '.h', '.cxx') or p.name in (
+                'http.h', 'http-private.h', 'getifaddrs-internal.h', 'hash.c'):
             continue
         s = p.read_text()
-        s = s.replace('#ifdef __APPLE__', '#if 0 /* iOS: no macOS integration */')
+        s = re.sub(r'#\s*ifdef __APPLE__', '#if 0 /* iOS: no macOS integration */', s)
+        s = re.sub(r'#\s*ifndef __APPLE__', '#if 1 /* iOS: portable integration */', s)
         s = s.replace('defined(__APPLE__)', '0 /* iOS: no macOS integration */')
         p.write_text(s)
     # The app owns cupsd's foreground process; daemonizing with fork is not an
