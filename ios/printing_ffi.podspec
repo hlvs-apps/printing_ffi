@@ -34,7 +34,7 @@ A Flutter plugin for direct printer communication using native FFI bindings for 
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'SUPPORTED_PLATFORMS' => 'iphoneos',
-    'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) PRINTING_FFI_IOS=1',
+    'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) PRINTING_FFI_IOS=1 _DARWIN_C_SOURCE=1',
     'HEADER_SEARCH_PATHS' => "$(inherited) #{stage}/include",
     'LIBRARY_SEARCH_PATHS' => "$(inherited) #{stage}/lib",
     'OTHER_LDFLAGS' => '$(inherited) -lcups -lcupsimage',
