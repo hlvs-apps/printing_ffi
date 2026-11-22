@@ -60,6 +60,12 @@ ln -sfn "$MACSDK/System/Library/Frameworks/IOKit.framework/Headers" "$BUILD/usb-
 )
 (
   cd "$BUILD/cups"
+  ac_cv_func_mbr_uid_to_uuid=no \
+  ac_cv_header_membership_h=no \
+  ac_cv_func_notify_post=no \
+  ac_cv_header_notify_h=no \
+  ac_cv_header_sandbox_h=no \
+  ac_cv_header_xpc_xpc_h=no \
   ac_cv_func_SCDynamicStoreCopyComputerName=no \
   ac_cv_header_CoreFoundation_CoreFoundation_h=no \
   ac_cv_header_ApplicationServices_ApplicationServices_h=no \
