@@ -106,6 +106,17 @@ cmake --install "$BUILD/jpeg-build"
   ./configure --host=aarch64-apple-darwin --prefix="$STAGE" --disable-shared --enable-static
   make -j"$JOBS"; make install
 )
+# The iOS SDK supplies zlib but no pkg-config metadata. Keep pkg-config
+# isolated from Homebrew while allowing the staged libpng dependency to resolve.
+sdk_zlib_version=$(awk '/^#define ZLIB_VERSION / {gsub(/"/, "", $3); print $3}' "$SDK/usr/include/zlib.h")
+[[ -n "$sdk_zlib_version" ]]
+cat > "$STAGE/lib/pkgconfig/zlib.pc" <<PC
+Name: zlib
+Description: zlib from the selected iPhoneOS SDK
+Version: $sdk_zlib_version
+Libs: -lz
+Cflags:
+PC
 (
   cd "$BUILD/filters"
   export CPPFLAGS="-I$STAGE/include"
