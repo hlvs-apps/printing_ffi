@@ -175,7 +175,7 @@ done
 # Ad-hoc signatures are replaced with the jailbreak's accepted signatures when
 # installing. Keep privileged helper entitlements OUT of the Runner application.
 for binary in "$RUNTIME/bin/"*; do
-  xcrun lipo -verify_arch arm64 "$binary"
+  xcrun lipo "$binary" -verify_arch arm64
   if xcrun otool -L "$binary" | tail -n +2 | awk '{print $1}' | grep -Ev '^(/usr/lib/|/System/Library/)' ; then
     echo "Non-system dynamic dependency in $binary" >&2; exit 1
   fi

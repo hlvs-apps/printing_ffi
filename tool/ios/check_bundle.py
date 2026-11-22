@@ -23,5 +23,6 @@ for relative in (
     path = bundles[0] / relative
     assert path.is_file() and path.stat().st_size > 0, f'Missing payload: {path}'
     if relative.startswith('bin/'):
-        subprocess.run(['xcrun', 'lipo', '-verify_arch', 'arm64', str(path)], check=True)
+        assert path.stat().st_mode & 0o111, f'Helper is not executable: {path}'
+        subprocess.run(['xcrun', 'lipo', str(path), '-verify_arch', 'arm64'], check=True)
 print('PASS: iOS FFI symbols and bundled CUPS/DNP runtime present')
