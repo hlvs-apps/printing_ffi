@@ -9,6 +9,9 @@ on:
       - 'lib/**'
       - 'pubspec.yaml'
       - '.github/workflows/ios-cups.yml'
+concurrency:
+  group: ios-cups-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:

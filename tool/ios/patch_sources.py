@@ -95,6 +95,14 @@ def patch(root):
     end = s.index('\ndist-hook:', begin)
     s = s[:begin] + 'xmli18n-tmp.h:\n\t@test -f $@\n' + s[end:]
     p.write_text(s)
+    # Generate the requested model serially. The optional STP_PARALLEL fork
+    # pool is a desktop optimization; iOS does not provide fork to applications.
+    p = root / 'gutenprint/src/cups/cups-genppd.c'
+    s = p.read_text()
+    begin = s.index('  if (getenv("STP_PARALLEL"))')
+    end = s.index('  if (models)', begin)
+    assert 'fork()' in s[begin:end]
+    p.write_text(s[:begin] + '  /* iOS: generate PPDs serially. */\n' + s[end:])
     (root / '.ios-patched').touch()
 
 
