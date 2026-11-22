@@ -2292,7 +2292,7 @@ void _helperIsolateEntryPoint(SendPort sendPort) {
             final pageRangePtr = pageRangeValue?.toNativeUtf8() ?? nullptr;
             try {
               final options = {...?data.options};
-              if (Platform.isMacOS || Platform.isLinux) {
+              if (Platform.isMacOS || Platform.isLinux || Platform.isIOS) {
                 if (data.copies > 1) options['copies'] = data.copies.toString();
                 if (pageRangeValue != null && pageRangeValue.isNotEmpty) options['page-ranges'] = pageRangeValue;
               }
@@ -2418,7 +2418,7 @@ void _helperIsolateEntryPoint(SendPort sendPort) {
             final pageRangePtr = pageRangeValue?.toNativeUtf8() ?? nullptr;
             try {
               final options = {...?data.options};
-              if (Platform.isMacOS || Platform.isLinux) {
+              if (Platform.isMacOS || Platform.isLinux || Platform.isIOS) {
                 if (data.copies > 1) options['copies'] = data.copies.toString();
                 if (pageRangeValue != null && pageRangeValue.isNotEmpty) options['page-ranges'] = pageRangeValue;
               }

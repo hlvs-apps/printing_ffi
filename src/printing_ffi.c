@@ -2892,12 +2892,12 @@ FFI_PLUGIN_EXPORT int open_printer_properties(const char *printer_name, intptr_t
     ClosePrinter(hPrinter);
     free(printer_name_w);
     return return_status;
-#elif defined(__ANDROID__)
+#elif defined(__ANDROID__) || defined(PRINTING_FFI_IOS)
     // No xdg-open / desktop browser on Android. The CUPS web interface is also
     // disabled in the bundled cupsd config. Not supported here.
     (void)hwnd;
     (void)printer_name;
-    LOG("open_printer_properties is not supported on Android");
+    LOG("Use the in-app CUPS settings on mobile");
     return 0; // Error / unsupported
 #else
     (void)hwnd; // hwnd is Windows-specific
@@ -3671,6 +3671,11 @@ FFI_PLUGIN_EXPORT bool print_file_with_dialog(const char *file_path, const char 
         set_last_error("ShellExecuteW failed to print file. Error code: %d. Ensure a default application is set for this file type.", (int)(intptr_t)result);
         return false;
     }
+#elif defined(PRINTING_FFI_IOS)
+    (void)file_path;
+    (void)doc_name;
+    set_last_error("Use the app's CUPS print queue on iOS");
+    return false;
 #else // macOS / Linux
 #ifdef __APPLE__
     // On macOS, use lpr to print the file.
