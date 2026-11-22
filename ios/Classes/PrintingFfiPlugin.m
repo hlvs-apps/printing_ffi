@@ -14,6 +14,7 @@
 
 extern char **environ;
 extern int printing_ffi_ios_running(void);
+extern void printing_ffi_ios_select_server(void);
 
 @implementation PrintingFfiPlugin {
     dispatch_queue_t _worker;
@@ -36,6 +37,9 @@ extern int printing_ffi_ios_running(void);
 // into Runner. A stock sandbox rejects this spawn and the app remains usable.
 - (NSString *)discover:(NSString **)reason {
     if (printing_ffi_ios_running()) {
+        // A serial GCD queue can still execute its blocks on different threads.
+        // Refresh libcups' thread-local endpoint after a scheduler restart.
+        printing_ffi_ios_select_server();
         // Do not claim a printer while CUPS owns an active job. Once idle,
         // rediscover so replacing RX1 with DS620 selects the new model's PPD.
         http_t *connection = httpConnect2(cupsServer(), ippPort(), NULL, AF_UNSPEC,

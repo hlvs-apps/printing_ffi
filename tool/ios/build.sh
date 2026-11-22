@@ -144,7 +144,11 @@ PC
     --with-cups-config="$STAGE/bin/cups-config" --disable-nls --disable-cups-ppds --disable-test \
     --disable-samples --disable-escputil --without-gimp2 --disable-libgutenprintui2 --without-readline \
     --without-doc --disable-shared --enable-static
-  make -j"$JOBS"
+  make -C src/main -j"$JOBS" libgutenprint.la
+  make -C src/xml -j"$JOBS" all
+  # Desktop tools such as cups-calibrate invoke system(); they are not part of
+  # the in-app print path. Build exactly the driver/filter/PPD programs we ship.
+  make -C src/cups -j"$JOBS" backend_gutenprint rastertogutenprint.5.3 commandtodyesub cups-genppd.5.3
 )
 mkdir -p "$RUNTIME/bin" "$RUNTIME/share/cups" "$RUNTIME/share/doc/cups" "$RUNTIME/share/gutenprint/5.3/xml" "$RUNTIME/licenses"
 copybin() { cp "$1" "$RUNTIME/bin/$2"; chmod 755 "$RUNTIME/bin/$2"; }
