@@ -31,6 +31,15 @@ jobs:
           cache: true
       - name: Build device example with bundled printing runtime
         working-directory: example
-        run: flutter build ios --release --no-codesign
+        run: |
+          if flutter build ios --release --no-codesign -v > /tmp/ios-build.log 2>&1; then
+            grep 'Built ' /tmp/ios-build.log || true
+          else
+            grep -E -B3 -A8 'dsymutil|debug map|GenerateDSYM|error:|Error \(|failed|Failed|libcups\.a|libcupsimage\.a' /tmp/ios-build.log || true
+            for library in "$HOME"/Library/Developer/Xcode/DerivedData/Runner-*/Build/Products/libcups*.a; do
+              if [ -f "$library" ]; then file "$library"; fi
+            done
+            exit 1
+          fi
       - name: Verify FFI exports and bundled runtime
         run: python3 tool/ios/check_bundle.py example/build/ios/iphoneos/Runner.app

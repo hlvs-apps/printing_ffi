@@ -153,7 +153,7 @@ PC
 mkdir -p "$RUNTIME/bin" "$RUNTIME/share/cups/mime" "$RUNTIME/share/doc/cups" "$RUNTIME/share/gutenprint/5.3/xml" "$RUNTIME/licenses"
 copybin() { cp "$1" "$RUNTIME/bin/$2"; chmod 755 "$RUNTIME/bin/$2"; }
 copybin "$BUILD/cups/scheduler/cupsd" libcupsd.so
-for name in cups-deviced cups-driverd cups-exec; do copybin "$BUILD/cups/scheduler/$name" "libcupsd_$name.so"; done
+for name in cups-deviced cups-driverd cups-exec; do copybin "$BUILD/cups/scheduler/$name" "libcupsd_${name#cups-}.so"; done
 for name in admin printers jobs classes help; do copybin "$BUILD/cups/cgi-bin/$name.cgi" "libcupscgi_$name.so"; done
 copybin "$BUILD/filters/imagetoraster" libcupsf_imagetoraster.so
 copybin "$BUILD/gutenprint/src/cups/backend_gutenprint" libcupsbe_gutenprint53usb.so

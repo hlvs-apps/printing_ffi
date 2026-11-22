@@ -13,7 +13,8 @@ for symbol in ('get_printers', 'get_print_jobs', 'start_cups_server',
 bundles = list(app.rglob('CupsRuntime.bundle'))
 assert len(bundles) == 1, f'Expected one CUPS payload, got {bundles}'
 for relative in (
-    'bin/libcupsd.so', 'bin/libcupsbe_gutenprint53usb.so',
+    'bin/libcupsd.so', 'bin/libcupsd_deviced.so', 'bin/libcupsd_driverd.so',
+    'bin/libcupsd_exec.so', 'bin/libcupsbe_gutenprint53usb.so',
     'bin/libcupsf_imagetoraster.so', 'bin/libcupsf_rastertogutenprint.so',
     'bin/libcupstool_gutenprint_genppd.so', 'bin/libcupscgi_admin.so',
     'share/cups/mime/mime.types', 'share/cups/mime/mime.convs',
