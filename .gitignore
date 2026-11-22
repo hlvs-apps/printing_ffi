@@ -104,3 +104,8 @@ example/android/app/src/main/cpp/
 **/.cxx/
 **/.gradle/
 **/.kotlin/
+
+# Generated iOS CUPS libraries and runtime payload
+ios/.build/
+ios/Resources/CupsRuntime.bundle/*
+!ios/Resources/CupsRuntime.bundle/Info.plist

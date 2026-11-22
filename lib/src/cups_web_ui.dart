@@ -124,7 +124,7 @@ extension CupsWebUi on PrintingFfi {
   }
 
   Future<void> _open(BuildContext context, String? url, String title) async {
-    if (!Platform.isAndroid || url == null) {
+    if ((!Platform.isAndroid && !Platform.isIOS) || url == null) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('CUPS server is not running yet.')),

@@ -7,6 +7,8 @@ import 'package:flutter/foundation.dart';
 import 'package:printing_ffi/printing_ffi_bindings_generated.dart' hide PrinterAttribute;
 import 'models/models.dart';
 import 'src/cups_android.dart';
+import 'src/cups_ios.dart';
+export 'src/cups_ios.dart' show CupsIos;
 import 'src/dnp_usb.dart';
 
 export 'models/models.dart';
@@ -19,7 +21,7 @@ export 'src/cups_web_ui.dart';
 export 'src/dnp_usb.dart';
 
 void _remapCupsOptions(Map<String, String> options) {
-  if (Platform.isMacOS || Platform.isLinux) {
+  if (Platform.isMacOS || Platform.isLinux || Platform.isIOS) {
     bool rotationHandled = false;
     if (options.containsKey('pdf-rotation')) {
       final rotationValue = int.tryParse(options.remove('pdf-rotation') ?? '-1') ?? -1;
@@ -121,9 +123,10 @@ class PrintingFfi {
     if (isTesting) {
       return defaultTargetPlatform == TargetPlatform.macOS ||
           defaultTargetPlatform == TargetPlatform.linux ||
-          defaultTargetPlatform == TargetPlatform.android;
+          defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS;
     }
-    return Platform.isMacOS || Platform.isLinux || Platform.isAndroid;
+    return Platform.isMacOS || Platform.isLinux || Platform.isAndroid || Platform.isIOS;
   }
 
   /// Internal constructor for creating the singleton instance.
@@ -133,7 +136,7 @@ class PrintingFfi {
   static const String _libName = 'printing_ffi';
 
   static final DynamicLibrary _dylib = () {
-    if (Platform.isMacOS) {
+    if (Platform.isMacOS || Platform.isIOS) {
       // For FFI plugins, the library is named lib<name>.dylib in the test environment,
       // but is embedded in a framework when running in a Flutter app.
       try {
@@ -150,7 +153,18 @@ class PrintingFfi {
   }();
 
   /// The bindings to the native functions. This is final and initialized by the constructors.
-  final PrintingFfiBindings _bindings;
+  final PrintingFfiBindings _nativeBindings;
+  PrintingFfiBindings get _bindings {
+    if (Platform.isIOS) _selectIosServer(_dylib);
+    return _nativeBindings;
+  }
+
+  static void _selectIosServer(DynamicLibrary library) {
+    if (Platform.isIOS) {
+      library.lookupFunction<Void Function(), void Function()>(
+          'printing_ffi_ios_select_server')();
+    }
+  }
 
   /// The localhost port the bundled Android cupsd is listening on, as returned by
   /// the most recent successful [startCupsServer]. `null` before cupsd is started
@@ -160,11 +174,11 @@ class PrintingFfi {
   int? _cupsServerPort;
 
   /// Internal constructor for creating the singleton instance.
-  PrintingFfi._() : _bindings = PrintingFfiBindings(_dylib); // Private constructor
+  PrintingFfi._() : _nativeBindings = PrintingFfiBindings(_dylib); // Private constructor
 
   /// Constructor for testing purposes.
   @visibleForTesting
-  PrintingFfi.forTest(this._bindings, {Future<SendPort>? helperIsolateSendPortFuture}) : _helperIsolateSendPortFuture = helperIsolateSendPortFuture;
+  PrintingFfi.forTest(this._nativeBindings, {Future<SendPort>? helperIsolateSendPortFuture}) : _helperIsolateSendPortFuture = helperIsolateSendPortFuture;
 
   /// A test-only method to allow injecting messages as if they came from the isolate.
   @visibleForTesting
@@ -358,7 +372,7 @@ class PrintingFfi {
   /// has not been started yet (or was stopped, or off Android). Set by
   /// [startCupsServer]; consumed by the web-UI helpers so an app never has to track
   /// the port itself.
-  int? get cupsServerPort => _cupsServerPort;
+  int? get cupsServerPort => Platform.isIOS ? CupsIos.instance.port : _cupsServerPort;
 
   /// Test-only hook to set the cupsd port without booting a real server (which
   /// requires Android + FFI), so the URL helpers can be unit-tested.
@@ -369,7 +383,7 @@ class PrintingFfi {
   /// `null` if cupsd is not running. Append `/admin`, `/printers/<name>`, `/jobs/`,
   /// etc. to reach a specific page.
   String? get cupsBaseUrl {
-    final port = _cupsServerPort;
+    final port = cupsServerPort;
     return port == null ? null : 'http://127.0.0.1:$port';
   }
 
@@ -2009,7 +2023,7 @@ void _helperIsolateEntryPoint(SendPort sendPort) {
         }
       }
       final dylib = () {
-        if (Platform.isMacOS) {
+        if (Platform.isMacOS || Platform.isIOS) {
           return DynamicLibrary.open('${PrintingFfi._libName}.framework/${PrintingFfi._libName}');
         }
         if (Platform.isLinux) return DynamicLibrary.open('lib${PrintingFfi._libName}.so');
@@ -2031,6 +2045,7 @@ void _helperIsolateEntryPoint(SendPort sendPort) {
           helperReceivePort.close();
           return;
         }
+        PrintingFfi._selectIosServer(dylib);
         if (data is _PrintRequest) {
           try {
             final namePtr = data.printerName.toNativeUtf8();

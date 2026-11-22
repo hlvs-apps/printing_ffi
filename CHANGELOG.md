@@ -1,3 +1,7 @@
+## Unreleased
+
+- Add optional bundled CUPS on iOS, gated by successful DNP/Citizen USB access. App startup remains available when printing is not permitted. Apple device validation is required before deployment.
+
 ## 0.1.1
 
 * Map Android bundled CUPS jobs using IPP states, including completion and cancellation.
