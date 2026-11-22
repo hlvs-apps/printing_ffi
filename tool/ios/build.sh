@@ -86,8 +86,9 @@ ln -sfn "$MACSDK/System/Library/Frameworks/IOKit.framework/Headers" "$BUILD/usb-
     make -C "$directory" install DSTROOT="$BUILD/cups-install" SYMROOT=
   done
 )
-cp -R "$BUILD/cups-install/cups/include/." "$STAGE/include/"
-cp "$BUILD/cups/cups/libcups.a" "$BUILD/cups/cups/libcupsimage.a" "$STAGE/lib/"
+# CUPS installs headers/data read-only. Replace prior staged files on rebuild.
+cp -fR "$BUILD/cups-install/cups/include/." "$STAGE/include/"
+cp -f "$BUILD/cups/cups/libcups.a" "$BUILD/cups/cups/libcupsimage.a" "$STAGE/lib/"
 # Retain CUPS' actual configured transitive libraries (iconv, resolv, etc.).
 # Relocate its include/library paths and use -l so Darwin libtool does not nest
 # complete archives inside libcupsfilters.a.
@@ -153,7 +154,7 @@ PC
   make -C src/cups -j"$JOBS" backend_gutenprint rastertogutenprint.5.3 commandtodyesub cups-genppd.5.3
 )
 mkdir -p "$RUNTIME/bin" "$RUNTIME/share/cups/mime" "$RUNTIME/share/doc/cups" "$RUNTIME/share/gutenprint/5.3/xml" "$RUNTIME/licenses"
-copybin() { cp "$1" "$RUNTIME/bin/$2"; chmod 755 "$RUNTIME/bin/$2"; }
+copybin() { cp -f "$1" "$RUNTIME/bin/$2"; chmod 755 "$RUNTIME/bin/$2"; }
 copybin "$BUILD/cups/scheduler/cupsd" libcupsd.so
 for name in cups-deviced cups-driverd cups-exec; do copybin "$BUILD/cups/scheduler/$name" "libcupsd_${name#cups-}.so"; done
 for name in admin printers jobs classes help; do copybin "$BUILD/cups/cgi-bin/$name.cgi" "libcupscgi_$name.so"; done
@@ -162,16 +163,16 @@ copybin "$BUILD/gutenprint/src/cups/backend_gutenprint" libcupsbe_gutenprint53us
 copybin "$BUILD/gutenprint/src/cups/rastertogutenprint.5.3" libcupsf_rastertogutenprint.so
 copybin "$BUILD/gutenprint/src/cups/commandtodyesub" libcupsf_commandtodyesub.so
 copybin "$BUILD/gutenprint/src/cups/cups-genppd.5.3" libcupstool_gutenprint_genppd.so
-cp -R "$BUILD/cups-install/cups/share/cups/." "$RUNTIME/share/cups/"
-cp -R "$BUILD/cups-install/cups/share/doc/cups/." "$RUNTIME/share/doc/cups/"
-cp -R "$BUILD/gutenprint/src/xml/." "$RUNTIME/share/gutenprint/5.3/xml/"
+cp -fR "$BUILD/cups-install/cups/share/cups/." "$RUNTIME/share/cups/"
+cp -fR "$BUILD/cups-install/cups/share/doc/cups/." "$RUNTIME/share/doc/cups/"
+cp -fR "$BUILD/gutenprint/src/xml/." "$RUNTIME/share/gutenprint/5.3/xml/"
 # Only runtime XML data; build products never enter the app as resources.
 find "$RUNTIME/share/gutenprint/5.3/xml" -type f ! -name '*.xml' ! -name 'xml-stamp' -delete
-cp "$BUILD/cups/conf/mime.types" "$BUILD/cups/conf/mime.convs" "$RUNTIME/share/cups/mime/"
-cp "$PLUGIN/tool/android/cupsfilters/imagetoraster.convs" "$RUNTIME/share/cups/mime/"
+cp -f "$BUILD/cups/conf/mime.types" "$BUILD/cups/conf/mime.convs" "$RUNTIME/share/cups/mime/"
+cp -f "$PLUGIN/tool/android/cupsfilters/imagetoraster.convs" "$RUNTIME/share/cups/mime/"
 for name in cups usb jpeg png filters gutenprint; do
   for license in COPYING LICENSE LICENSE.md LICENSE.txt; do
-    [[ ! -f "$BUILD/$name/$license" ]] || cp "$BUILD/$name/$license" "$RUNTIME/licenses/$name-$license"
+    [[ ! -f "$BUILD/$name/$license" ]] || cp -f "$BUILD/$name/$license" "$RUNTIME/licenses/$name-$license"
   done
 done
 # Ad-hoc signatures are replaced with the jailbreak's accepted signatures when
