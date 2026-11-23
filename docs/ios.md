@@ -29,14 +29,18 @@ The USB library is linked into a separate helper, not the app framework. Stock
 iOS can load the app without loading private USB code; a denied helper launch
 is returned as unavailable printing.
 
-**Runner must run unsandboxed.** iOS denies a sandboxed container app
-`process-fork`/`process-exec` of any child — `posix_spawn` returns `EPERM`
-before the child's own entitlements or trust ever matter — so the app cannot
-launch cupsd, the filters or the Gutenprint backend at all while sandboxed. The
-app therefore carries `com.apple.private.security.no-sandbox` in
-`Runner.entitlements`. Apple does not grant this entitlement, so it is honored
-only on a jailbroken device; that is the entire premise of bundled USB printing.
-The privileged USB/IOKit entitlements stay on the helper, not on Runner.
+**The process that hosts this runtime must run unsandboxed.** iOS denies a
+sandboxed container app `process-fork`/`process-exec` of any child — `posix_spawn`
+returns `EPERM` before the child's own entitlements or trust ever matter — so a
+normal, App-Store-signed app can never launch cupsd, the filters or the
+Gutenprint backend. Running this runtime inside the app itself therefore
+requires `com.apple.private.security.no-sandbox`, which Apple does not grant
+(automatic signing rejects it) — so that is only an option for a jailbreak-only,
+ad-hoc-signed build, never an App Store build. For an App-Store-publishable app
+the CUPS+USB runtime must live in a **separate unsandboxed host** the app reaches
+over IPP: a LAN bridge (Linux/Android/small device) for stock iOS, or a localhost
+jailbreak daemon for the one-device case. The privileged USB/IOKit entitlements
+stay on the helper either way.
 
 For a jailbreak deployment, trust **all** executables under
 `CupsRuntime.bundle/bin` using that jailbreak's installation mechanism. On
