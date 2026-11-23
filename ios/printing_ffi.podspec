@@ -34,10 +34,19 @@ A Flutter plugin for direct printer communication using native FFI bindings for 
     :script => 'bash "${PODS_TARGET_SRCROOT}/../tool/ios/build.sh"',
     :execution_position => :before_compile,
   }, {
+    # Build the on-device CUPS daemon .deb from the app build (printing_ffi is in
+    # pub-cache, not a separate checkout), so the app can ship + install it.
+    :name => 'Build on-device CUPS daemon package',
+    :script => 'bash "${PODS_TARGET_SRCROOT}/../tool/ios/daemon/build_daemon_deb.sh"',
+    :execution_position => :before_compile,
+  }, {
     :name => 'Embed bundled iOS CUPS runtime',
     :script => 'bash "${PODS_TARGET_SRCROOT}/../tool/ios/embed_runtime.sh"',
     :execution_position => :after_compile,
-    :output_files => ['$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/CupsRuntime.bundle'],
+    :output_files => [
+      '$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/CupsRuntime.bundle',
+      '$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/com.fotobox.cupsd.deb',
+    ],
     :always_out_of_date => '1',
   }]
   s.pod_target_xcconfig = {

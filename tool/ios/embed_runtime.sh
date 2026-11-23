@@ -18,3 +18,16 @@ for helper in libcupsd.so libcupsbe_gutenprint53usb.so libcupstool_gutenprint_ge
   }
 done
 echo "Embedded CUPS runtime at $DEST"
+
+# Embed the on-device CUPS daemon .deb so the app can hand it to a jailbreak
+# package manager (Sileo/Zebra) via open-in — the only supported install path
+# (no SSH, no manual install). Built by tool/ios/daemon/build_daemon_deb.sh.
+DEB_SRC="${PODS_TARGET_SRCROOT:?}/Resources/com.fotobox.cupsd.deb"
+DEB_DEST="${TARGET_BUILD_DIR:?}/${UNLOCALIZED_RESOURCES_FOLDER_PATH:?}/com.fotobox.cupsd.deb"
+if [[ -s "$DEB_SRC" ]]; then
+  /bin/cp -f "$DEB_SRC" "$DEB_DEST"
+  echo "Embedded CUPS daemon package at $DEB_DEST"
+else
+  echo "error: CUPS daemon .deb not found at $DEB_SRC (daemon build phase did not run)" >&2
+  exit 1
+fi

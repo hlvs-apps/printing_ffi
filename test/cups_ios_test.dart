@@ -138,6 +138,21 @@ void main() {
     }
   });
 
+  test('installDaemon forwards to the native open-in and reports the result', () async {
+    for (final (native, expected) in <(Object?, bool)>[(true, true), (false, false), (null, false)]) {
+      final calls = <String>[];
+      final cups = CupsIos.forTest(
+        invoke: (method, arguments) async {
+          calls.add(method);
+          return native;
+        },
+      );
+      expect(await cups.installDaemon(), expected);
+      expect(calls, ['installDaemon']);
+      cups.dispose();
+    }
+  });
+
   test('useServer switches the host endpoint and re-probes it', () async {
     final servers = <String>[];
     final cups = CupsIos.forTest(

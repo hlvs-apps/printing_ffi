@@ -51,6 +51,13 @@ class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
   Timer? _retry;
   bool _observing = false;
 
+  /// Hand the app-bundled daemon `.deb` to the installed jailbreak package
+  /// manager (Sileo, Zebra, ...) through the iOS open-in menu, so the user
+  /// installs the on-device CUPS daemon (topology L) in one tap. The app never
+  /// performs the privileged install itself; the manager (root) does. Returns
+  /// false if the app ships no `.deb` or no package manager is installed.
+  Future<bool> installDaemon() async => (await _call('installDaemon')) == true;
+
   /// Point the client at a different CUPS host (LAN bridge). Re-probes.
   Future<bool> useServer(String endpoint) {
     if (endpoint != server) {

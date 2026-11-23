@@ -1,7 +1,11 @@
 #import "PrintingFfiPlugin.h"
+#import <UIKit/UIKit.h>
 #include "../../src/printing_ffi.h"
 #include <cups/cups.h>
 #include <string.h>
+
+@interface PrintingFfiPlugin () <UIDocumentInteractionControllerDelegate>
+@end
 
 // The iOS app is a CUPS CLIENT only. It never runs cupsd, opens USB, or spawns
 // a process (iOS forbids a sandboxed app from both). It points the in-process
@@ -24,6 +28,7 @@ static const char *const kSupportedDrivers[] = {
 
 @implementation PrintingFfiPlugin {
     dispatch_queue_t _worker;
+    UIDocumentInteractionController *_docController; // retained while the menu is up
 }
 
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar {
@@ -85,7 +90,55 @@ static const char *const kSupportedDrivers[] = {
     return @{@"detail": @"no supported DNP queue on host"};
 }
 
+// The frontmost view controller to present the open-in menu from.
+- (UIViewController *)topViewController {
+    UIViewController *root = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if ([scene isKindOfClass:UIWindowScene.class] &&
+            scene.activationState == UISceneActivationStateForegroundActive) {
+            for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+                if (window.isKeyWindow) { root = window.rootViewController; break; }
+            }
+        }
+        if (root) break;
+    }
+    while (root.presentedViewController) root = root.presentedViewController;
+    return root;
+}
+
+// Hand the bundled daemon .deb to whatever jailbreak package manager is
+// installed (Sileo, Zebra, ...) via the iOS open-in menu. Store-agnostic: every
+// APT frontend registers as a .deb handler. The app never installs anything
+// itself — it only presents the file; the manager (root) runs dpkg + postinst.
+// Returns true if the menu was presented, false if no .deb or no handler.
+- (NSNumber *)installDaemon {
+    NSString *path = [[NSBundle mainBundle] pathForResource:@"com.fotobox.cupsd" ofType:@"deb"];
+    if (!path || ![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        return @NO;
+    }
+    UIViewController *top = [self topViewController];
+    if (!top) return @NO;
+    _docController = [UIDocumentInteractionController
+        interactionControllerWithURL:[NSURL fileURLWithPath:path]];
+    _docController.delegate = self;
+    _docController.UTI = @"org.debian.deb-archive";
+    BOOL presented = [_docController presentOpenInMenuFromRect:CGRectMake(
+        top.view.bounds.size.width / 2, top.view.bounds.size.height - 1, 1, 1)
+        inView:top.view animated:YES];
+    if (!presented) _docController = nil;
+    return @(presented);
+}
+
+- (void)documentInteractionControllerDidDismissOpenInMenu:(UIDocumentInteractionController *)controller {
+    _docController = nil;
+}
+
 - (void)handleMethodCall:(FlutterMethodCall *)call result:(FlutterResult)result {
+    if ([call.method isEqualToString:@"installDaemon"]) {
+        // UIKit must run on the main thread.
+        dispatch_async(dispatch_get_main_queue(), ^{ result([self installDaemon]); });
+        return;
+    }
     if (![call.method isEqualToString:@"configure"] &&
         ![call.method isEqualToString:@"probe"]) {
         result(FlutterMethodNotImplemented);
