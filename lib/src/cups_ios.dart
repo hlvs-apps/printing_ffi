@@ -4,29 +4,66 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
-/// Optional in-app CUPS. Neither this facade nor its native probe loads the USB
-/// library into the app. A sandbox denial simply leaves printing unavailable.
+/// The loopback endpoint the on-device CUPS daemon listens on (topology L: a
+/// jailbreak LaunchDaemon on the same device). LAN hosts (topologies B/A: a
+/// Linux/Pi bridge or the Android app) override it with a discovered or
+/// entered `host:port`.
+const String kDefaultCupsServer = '127.0.0.1:6310';
+
+/// iOS CUPS **client**. The app never runs cupsd, opens USB, or spawns a
+/// process — iOS forbids a sandboxed app from both. Instead it points the
+/// in-process libcups client at an external CUPS host (a localhost jailbreak
+/// daemon, or a LAN bridge) and submits over IPP. A host that is unreachable or
+/// exposes no supported DNP queue simply leaves printing unavailable; the app
+/// stays usable and degrades, never refuses.
+///
+/// Public surface is unchanged from the old in-app-cupsd facade ([ready],
+/// [queueName], [status], [watch], [initialize]) so `printing.dart` and the
+/// settings UI need no changes. What changed is the native protocol: `configure`
+/// (point libcups at [server]) + `probe` (find the DNP queue the host created),
+/// replacing the old `discover` (USB) + `start` (fork cupsd).
 class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
   CupsIos._();
   static final instance = CupsIos._();
 
   @visibleForTesting
-  CupsIos.forTest({required this.invoke});
+  CupsIos.forTest({required this.invoke, String? server})
+      : server = server ?? kDefaultCupsServer;
 
   @visibleForTesting
-  Future<dynamic> Function(String method, Map<String, dynamic>? arguments)? invoke;
+  Future<dynamic> Function(String method, Map<String, dynamic>? arguments)?
+      invoke;
 
   static const _channel = MethodChannel('printing_ffi/ios_cups');
   final status = ValueNotifier<String>('CUPS: not started');
-  int? port;
+
+  /// The CUPS host endpoint (`host:port`). Defaults to the localhost daemon;
+  /// set via [useServer] to a LAN host for the bridge topologies.
+  String server = kDefaultCupsServer;
+
   String? queueName;
-  bool get ready => port != null && queueName != null;
+  String? _driver;
+
+  /// Ready to print: a supported DNP queue was found on [server].
+  bool get ready => queueName != null;
+
   Future<bool>? _pending;
   Timer? _retry;
   bool _observing = false;
 
-  /// Call after the first frame on the main engine. Retry device discovery while
-  /// foregrounded so attaching a printer after launch needs no app restart.
+  /// Point the client at a different CUPS host (LAN bridge). Re-probes.
+  Future<bool> useServer(String endpoint) {
+    if (endpoint != server) {
+      server = endpoint;
+      queueName = null;
+      _driver = null;
+    }
+    return initialize();
+  }
+
+  /// Call after the first frame on the main engine. Re-probes the host while
+  /// foregrounded so attaching a printer (or the daemon coming up) after launch
+  /// needs no app restart.
   void watch() {
     if (!Platform.isIOS || _observing) return;
     _observing = true;
@@ -44,8 +81,6 @@ class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      // The scheduler may have been killed while suspended. Native start checks
-      // the owned child's status before reporting an existing session as ready.
       _resume();
     } else {
       _retry?.cancel();
@@ -53,43 +88,45 @@ class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  Future<dynamic> _call(String method, [Map<String, dynamic>? arguments]) => invoke?.call(method, arguments) ?? _channel.invokeMethod(method, arguments);
+  Future<dynamic> _call(String method, [Map<String, dynamic>? arguments]) =>
+      invoke?.call(method, arguments) ??
+      _channel.invokeMethod(method, arguments);
 
   /// Fail closed for printing, never for app startup. Concurrent callers share
-  /// one attempt; unsuccessful attempts are retryable (permission/USB hot-plug).
+  /// one attempt; unsuccessful attempts are retryable (host down, printer not
+  /// yet attached, daemon still starting).
   Future<bool> initialize() => _pending ??= _initialize().whenComplete(() {
-    _pending = null;
-  });
+        _pending = null;
+      });
 
   Future<bool> _initialize() async {
-    var stage = 'USB discovery';
+    var stage = 'connect';
     try {
-      final discovery = await _call('discover');
-      if (discovery is! String) {
-        throw StateError('USB printer access unavailable');
+      // Point libcups at the host. Cheap and local; it only stores the target.
+      await _call('configure', {'server': server});
+      stage = 'printer discovery';
+      // Ask the host which supported DNP queue it exposes. The host (daemon or
+      // bridge) ran the USB discovery and created the queue; the app only reads
+      // it back over IPP. Unreachable host throws; reachable-but-no-printer
+      // returns a map without a queueName.
+      final probe = await _call('probe');
+      final name = (probe is Map) ? probe['queueName'] : null;
+      if (name is! String || name.isEmpty || name.length > 127) {
+        final detail = (probe is Map && probe['detail'] is String)
+            ? ': ${(probe['detail'] as String).trim()}'
+            : '';
+        throw StateError('No accessible supported printer on $server$detail');
       }
-      final printers = parseDiscovery(discovery);
-      if (printers.isEmpty) {
-        final detail = discovery.trim();
-        throw StateError(
-          'No accessible supported USB printer'
-          '${detail.isEmpty ? '' : ': ${detail.substring(0, detail.length > 4096 ? 4096 : detail.length)}'}',
-        );
-      }
-      final printer = printers.first;
-      stage = 'scheduler and queue setup';
-      final result = await _call('start', printer);
-      if (result is! Map || result['port'] is! int || (result['port'] as int) < 1 || (result['port'] as int) > 65535) {
-        throw StateError('CUPS did not become ready');
-      }
-      port = result['port'] as int;
-      queueName = printer['queueName'];
-      _setStatus('CUPS: ${printer['driver']} ready');
+      queueName = name;
+      _driver = (probe is Map && probe['driver'] is String)
+          ? probe['driver'] as String
+          : null;
+      _setStatus('CUPS: ${_driver ?? 'printer'} on $server ready');
       notifyListeners();
       return true;
     } catch (error) {
-      port = null;
       queueName = null;
+      _driver = null;
       _setStatus('CUPS unavailable ($stage): $error');
       notifyListeners();
       return false;
@@ -99,45 +136,10 @@ class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
   void _setStatus(String value) {
     if (status.value == value) return;
     status.value = value;
-    // flutter run must report the startup cause, not only downstream polling
-    // failures. Repeated foreground probes with the same result stay quiet.
+    // flutter run must report the real startup cause, not only downstream
+    // polling failures. Repeated foreground probes with the same result stay
+    // quiet.
     debugPrint(value);
-  }
-
-  /// Use Gutenprint's exact device URI (including its encoded serial), never an
-  /// inferred model or a DS620/raw fallback for a different dye-sub printer.
-  @visibleForTesting
-  static List<Map<String, String>> parseDiscovery(String output) {
-    const drivers = {
-      'citizen-cw-01',
-      'dnp-ds40',
-      'dnp-ds80',
-      'dnp-dsrx1',
-      'citizen-cw-02',
-      'dnp-ds80dx',
-      'citizen-cx-02',
-      'citizen-cx-02w',
-      'citizen-cz-01',
-      'dnp-ds620',
-      'dnp-ds820',
-      'dnp-qw410',
-    };
-    final result = <Map<String, String>>[];
-    for (final line in output.split('\n')) {
-      final fields = line.trim().split(RegExp(r'\s+'));
-      if (fields.length < 2 || fields.first != 'direct') continue;
-      final uri = Uri.tryParse(fields[1]);
-      if (uri == null || uri.scheme != 'gutenprint53+usb' || !drivers.contains(uri.host) || uri.pathSegments.length != 1 || uri.pathSegments.single.isEmpty || uri.hasQuery || uri.hasFragment) {
-        continue;
-      }
-      // Encode the entire URI injectively; replacing punctuation with '_' can
-      // collide for two physical serials and silently reuse the wrong queue.
-      final serial = uri.pathSegments.single.codeUnits.map((c) => c.toRadixString(16).padLeft(4, '0')).join();
-      final queue = '${uri.host}_$serial';
-      if (queue.length > 127) continue;
-      result.add({'uri': fields[1], 'driver': uri.host, 'queueName': queue});
-    }
-    return result;
   }
 
   @override

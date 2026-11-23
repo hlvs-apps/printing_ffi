@@ -372,7 +372,7 @@ class PrintingFfi {
   /// has not been started yet (or was stopped, or off Android). Set by
   /// [startCupsServer]; consumed by the web-UI helpers so an app never has to track
   /// the port itself.
-  int? get cupsServerPort => Platform.isIOS ? CupsIos.instance.port : _cupsServerPort;
+  int? get cupsServerPort => _cupsServerPort;
 
   /// Test-only hook to set the cupsd port without booting a real server (which
   /// requires Android + FFI), so the URL helpers can be unit-tested.
@@ -383,7 +383,13 @@ class PrintingFfi {
   /// `null` if cupsd is not running. Append `/admin`, `/printers/<name>`, `/jobs/`,
   /// etc. to reach a specific page.
   String? get cupsBaseUrl {
-    final port = cupsServerPort;
+    // iOS runs no local cupsd. The CUPS web UI lives on the host the client
+    // targets (the localhost daemon, or a LAN bridge), so derive the base URL
+    // from that endpoint once a supported printer is up.
+    if (Platform.isIOS) {
+      return CupsIos.instance.ready ? 'http://${CupsIos.instance.server}' : null;
+    }
+    final port = _cupsServerPort;
     return port == null ? null : 'http://127.0.0.1:$port';
   }
 

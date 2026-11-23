@@ -5,146 +5,154 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:printing_ffi/src/cups_ios.dart';
 
 void main() {
-  test('USB errors survive discovery and identify the failed startup stage', () async {
+  test('an unreachable host leaves printing unavailable, retryable', () async {
+    var reachable = false;
     final cups = CupsIos.forTest(
       invoke: (method, arguments) async {
-        expect(method, 'discover');
-        return 'ERROR: Could not open device 1343:0006 - 3 (need to be root?)';
+        if (method == 'configure') return null;
+        if (!reachable) {
+          throw PlatformException(code: 'unavailable', message: 'connection refused');
+        }
+        return {'queueName': 'dnp-ds620_313233', 'driver': 'dnp-ds620'};
       },
     );
     expect(await cups.initialize(), false);
-    expect(cups.status.value, contains('USB discovery'));
-    expect(cups.status.value, contains('Could not open device'));
     expect(cups.ready, false);
+    expect(cups.status.value, contains('printer discovery'));
+    expect(cups.status.value, contains('connection refused'));
+    // A host coming up later needs no restart.
+    reachable = true;
+    expect(await cups.initialize(), true);
+    expect(cups.ready, true);
+    expect(cups.queueName, 'dnp-ds620_313233');
     cups.dispose();
   });
 
-  test('backend diagnostics do not hide a successfully discovered printer', () async {
+  test('configure failure reports the connect stage, not printer discovery', () async {
     final cups = CupsIos.forTest(
       invoke: (method, arguments) async {
-        return method == 'discover' ? 'DEBUG: probing USB\ndirect gutenprint53+usb://dnp-ds620/123 "DNP"\nINFO: done' : throw PlatformException(code: 'unavailable', message: 'cupds spawn denied');
+        if (method == 'configure') {
+          throw PlatformException(code: 'unavailable', message: 'bad server string');
+        }
+        return {'queueName': 'x'};
       },
     );
     expect(await cups.initialize(), false);
-    expect(cups.status.value, contains('scheduler and queue setup'));
-    expect(cups.status.value, contains('spawn denied'));
+    expect(cups.status.value, contains('connect'));
+    expect(cups.status.value, isNot(contains('printer discovery')));
+    expect(cups.status.value, contains('bad server string'));
     cups.dispose();
   });
 
-  test('a failed health check revokes readiness and a restart restores it', () async {
-    var running = true;
+  test('a supported DNP queue on the host makes the client ready', () async {
+    final seen = <String>[];
     final cups = CupsIos.forTest(
       invoke: (method, arguments) async {
-        if (!running) throw PlatformException(code: 'unavailable');
-        return method == 'discover' ? 'direct gutenprint53+usb://dnp-ds620/123 "DNP"' : {'port': 16311};
+        seen.add(method);
+        if (method == 'configure') {
+          expect(arguments!['server'], '127.0.0.1:6310');
+          return null;
+        }
+        return {'queueName': 'dnp-dsrx1_52583120', 'driver': 'dnp-dsrx1'};
       },
     );
     expect(await cups.initialize(), true);
-    running = false;
+    expect(cups.ready, true);
+    expect(cups.queueName, 'dnp-dsrx1_52583120');
+    expect(cups.status.value, contains('dnp-dsrx1'));
+    expect(cups.status.value, contains('127.0.0.1:6310'));
+    expect(seen, ['configure', 'probe']);
+    cups.dispose();
+  });
+
+  test('a reachable host with no supported printer stays unavailable', () async {
+    final cups = CupsIos.forTest(
+      invoke: (method, arguments) async =>
+          method == 'configure' ? null : {'detail': 'no supported queues on host'},
+    );
     expect(await cups.initialize(), false);
     expect(cups.ready, false);
-    running = true;
+    expect(cups.status.value, contains('No accessible supported printer'));
+    expect(cups.status.value, contains('no supported queues on host'));
+    cups.dispose();
+  });
+
+  test('health revoke drops readiness; a restored host restores it', () async {
+    var reachable = true;
+    final cups = CupsIos.forTest(
+      invoke: (method, arguments) async {
+        if (method == 'configure') return null;
+        if (!reachable) throw PlatformException(code: 'unavailable');
+        return {'queueName': 'dnp-ds620_313233', 'driver': 'dnp-ds620'};
+      },
+    );
+    expect(await cups.initialize(), true);
+    reachable = false;
+    expect(await cups.initialize(), false);
+    expect(cups.ready, false);
+    reachable = true;
     expect(await cups.initialize(), true);
     cups.dispose();
   });
 
-  const rx = 'direct gutenprint53+usb://dnp-dsrx1/RX%201 "DNP" "RX1HS"';
-  test(
-    'permission denial leaves printing dormant and allows a later retry',
-    () async {
-      var allowed = false;
-      final calls = <String>[];
-      final cups = CupsIos.forTest(
-        invoke: (method, arguments) async {
-          calls.add(method);
-          if (method == 'discover') {
-            if (!allowed) throw PlatformException(code: 'unavailable');
-            return rx;
-          }
-          expect(arguments!['driver'], 'dnp-dsrx1');
-          expect(arguments['uri'], 'gutenprint53+usb://dnp-dsrx1/RX%201');
-          return {'port': 16311};
-        },
-      );
-      expect(await cups.initialize(), false);
-      expect(cups.ready, false);
-      expect(calls, ['discover']);
-      allowed = true;
-      expect(await cups.initialize(), true);
-      expect(cups.ready, true);
-      expect(cups.queueName, startsWith('dnp-dsrx1_'));
-      cups.dispose();
-    },
-  );
-
-  test(
-    'no printer, unknown driver, and malformed output never start CUPS',
-    () async {
-      for (final output in [
-        '',
-        'direct usb://printer/a',
-        'direct gutenprint53+usb://unknown/123',
-        'direct gutenprint53+usb://dnp-ds620/',
-        'direct gutenprint53+usb://dnp-ds620/123?test=1',
-      ]) {
-        final cups = CupsIos.forTest(
-          invoke: (method, arguments) async {
-            expect(method, 'discover');
-            return output;
-          },
-        );
-        expect(await cups.initialize(), false);
-        expect(cups.ready, false);
-        cups.dispose();
-      }
-    },
-  );
-
-  test('overlapping attempts run one discovery and one start', () async {
-    final discovery = Completer<String>();
-    var starts = 0;
+  test('overlapping attempts run one configure and one probe', () async {
+    final probe = Completer<Map>();
+    var configures = 0;
+    var probes = 0;
     final cups = CupsIos.forTest(
       invoke: (method, arguments) async {
-        if (method == 'discover') return discovery.future;
-        starts++;
-        return {'port': 16311};
+        if (method == 'configure') {
+          configures++;
+          return null;
+        }
+        probes++;
+        return probe.future;
       },
     );
     final first = cups.initialize();
     final second = cups.initialize();
-    discovery.complete(rx);
+    probe.complete({'queueName': 'dnp-ds620_313233', 'driver': 'dnp-ds620'});
     expect(await first, true);
     expect(await second, true);
-    expect(starts, 1);
+    expect(configures, 1);
+    expect(probes, 1);
     cups.dispose();
   });
 
-  test('daemon or queue setup failure never enables printing', () async {
-    for (final response in [
+  test('malformed probe responses never enable printing', () async {
+    for (final response in <Object?>[
       null,
       {},
-      {'port': 0},
-      {'port': 70000},
-      {'port': '631'},
+      {'driver': 'dnp-ds620'},
+      {'queueName': ''},
+      {'queueName': 123},
+      {'queueName': 'q' * 128}, // over the 127-char CUPS limit
     ]) {
       final cups = CupsIos.forTest(
-        invoke: (method, arguments) async => method == 'discover' ? rx : response,
+        invoke: (method, arguments) async => method == 'configure' ? null : response,
       );
-      expect(await cups.initialize(), false);
-      expect(cups.port, null);
+      expect(await cups.initialize(), false, reason: 'response: $response');
+      expect(cups.ready, false);
       expect(cups.queueName, null);
       cups.dispose();
     }
   });
 
-  test('model and serial select distinct queues without changing USB URIs', () {
-    final printers = CupsIos.parseDiscovery(
-      '$rx\n'
-      'direct gutenprint53+usb://dnp-ds620/AB-CD "DNP"\n'
-      'direct gutenprint53+usb://dnp-ds620/AB_CD "DNP"',
+  test('useServer switches the host endpoint and re-probes it', () async {
+    final servers = <String>[];
+    final cups = CupsIos.forTest(
+      invoke: (method, arguments) async {
+        if (method == 'configure') {
+          servers.add(arguments!['server'] as String);
+          return null;
+        }
+        return {'queueName': 'dnp-ds620_313233', 'driver': 'dnp-ds620'};
+      },
     );
-    expect(printers.length, 3);
-    expect(printers.map((p) => p['queueName']).toSet().length, 3);
-    expect(printers[1]['driver'], 'dnp-ds620');
+    expect(await cups.initialize(), true);
+    expect(await cups.useServer('10.0.0.5:6310'), true);
+    expect(cups.server, '10.0.0.5:6310');
+    expect(servers, ['127.0.0.1:6310', '10.0.0.5:6310']);
+    cups.dispose();
   });
 }
