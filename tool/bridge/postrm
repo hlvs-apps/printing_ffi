@@ -1,0 +1,25 @@
+#!/bin/sh
+# Remove keeps the LAN cupsd configuration and the token (a reinstall pairs the
+# same booths). Purge undoes everything: the original cupsd.conf comes back.
+set -e
+CONF=/etc/cups/cupsd.conf
+case "$1" in
+	(remove)
+	deb-systemd-helper mask fotobox-print-bridge.service >/dev/null || true
+	;;
+	(purge)
+	deb-systemd-helper purge fotobox-print-bridge.service >/dev/null || true
+	deb-systemd-helper unmask fotobox-print-bridge.service >/dev/null || true
+	if [ -e "$CONF.fotobox-orig" ]; then
+		mv -f "$CONF.fotobox-orig" "$CONF"
+		if [ -d /run/systemd/system ]; then
+			systemctl restart cups.service || true
+		fi
+	fi
+	if getent passwd fotobox-print >/dev/null; then
+		userdel fotobox-print || true
+	fi
+	rm -rf /etc/fotobox-print-bridge /var/lib/fotobox-print-bridge
+	;;
+esac
+exit 0

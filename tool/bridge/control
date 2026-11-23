@@ -1,0 +1,15 @@
+Package: fotobox-print-bridge
+Version: 0.1.0
+Architecture: any
+Maintainer: Fotobox
+Section: net
+Priority: optional
+Depends: cups-daemon (>= 2.2), cups-filters, printer-driver-gutenprint (>= 5.3), avahi-daemon, passwd, libcups2 (>= 2.2) | libcups2t64
+Recommends: qrencode
+Description: Fotobox print bridge: USB dye-sub printing for the Fotobox app over the LAN
+ Turns a small Linux box (Raspberry Pi, any Debian/Ubuntu machine) into the
+ CUPS print host for Fotobox booths: plug a DNP or Citizen dye-sub printer in
+ by USB and the booth app prints to it over the local network, no jailbreak
+ needed. Uses the distribution's CUPS and Gutenprint; adds the queue manager
+ (one queue per attached printer, default page size from the loaded paper),
+ a LAN-only, token-protected cupsd configuration and DNS-SD discovery.

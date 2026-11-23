@@ -1,0 +1,25 @@
+#!/bin/sh
+# Start the on-device CUPS daemon after install/upgrade. Runs as root under any
+# dpkg frontend (Sileo, Zebra, ...). Follows Procursus' own LaunchDaemon
+# packages (openssh-server): rootless launchctl is /var/jb/bin/launchctl.
+# No trustcache step: the hooked launchd trusts the daemon on spawn, and the
+# daemon (hooked in turn) trusts cupsd, the filters and the backend it spawns.
+set -e
+PATH=/var/jb/usr/bin:/var/jb/usr/sbin:/var/jb/bin:/var/jb/sbin:/usr/bin:/usr/sbin:/bin:/sbin:$PATH
+export PATH
+
+PLIST=/var/jb/Library/LaunchDaemons/com.fotobox.cupsd.plist
+STATE=/var/jb/var/lib/fotobox-cups
+
+case "$1" in
+	(configure)
+	# Writable state for the daemon, which runs as mobile (501).
+	mkdir -p "$STATE"
+	chown -R 501:501 "$STATE"
+	chmod 0755 "$STATE"
+	launchctl unload "$PLIST" 2>/dev/null || true
+	launchctl load -w "$PLIST"
+	;;
+esac
+
+exit 0

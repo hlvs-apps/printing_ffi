@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- LaunchDaemon for the on-device CUPS host (topology L). Launched by the
+     jailbreak's hooked launchd, so it runs outside the app sandbox and the
+     binaries it spawns are trusted on exec. Runs as mobile: the CUPS runtime
+     expects a non-root cupsd (see tool/cups_host/fotobox_cupsd.c). KeepAlive restarts it; it
+     outlives the app because it is a daemon, not an app. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.fotobox.cupsd</string>
+	<key>Program</key>
+	<string>/var/jb/usr/lib/fotobox-cups/bin/fotobox-cupsd</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/var/jb/usr/lib/fotobox-cups/bin/fotobox-cupsd</string>
+	</array>
+	<key>UserName</key>
+	<string>mobile</string>
+	<key>GroupName</key>
+	<string>mobile</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>StandardErrorPath</key>
+	<string>/var/jb/var/lib/fotobox-cups/fotobox-cupsd.log</string>
+	<key>StandardOutPath</key>
+	<string>/var/jb/var/lib/fotobox-cups/fotobox-cupsd.log</string>
+</dict>
+</plist>

@@ -1,0 +1,16 @@
+# Keeps the local cupsd's queues in step with the USB dye-sub printers attached
+# to this box (one queue per printer, default page size from the loaded paper,
+# the newest one the default). cupsd itself is the distribution's cups.service.
+[Unit]
+Description=Fotobox print bridge (USB dye-sub queues for the Fotobox app)
+Wants=cups.service
+After=cups.service
+
+[Service]
+ExecStart=/usr/lib/fotobox-print-bridge/fotobox-cupsd
+Restart=always
+RestartSec=5
+StateDirectory=fotobox-print-bridge
+
+[Install]
+WantedBy=multi-user.target

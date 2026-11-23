@@ -21,17 +21,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install native build tools
-        run: brew install pkg-config cmake
-      - name: Build native iOS runtime
-        run: bash tool/ios/build.sh
+        run: brew install pkg-config cmake dpkg
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: "3.47.4"
           channel: stable
           cache: true
-      - name: Build device example with bundled printing runtime
+      # Do not prebuild the native payload: the real first install starts with
+      # only Info.plist and must generate AND embed every helper during Xcode.
+      - name: Build device example from an unbuilt runtime
         working-directory: example
         run: |
+          test ! -e ../ios/Resources/CupsRuntime.bundle/bin
           if flutter build ios --release --no-codesign -v > /tmp/ios-build.log 2>&1; then
             grep 'Built ' /tmp/ios-build.log || true
           else
@@ -41,5 +42,17 @@ jobs:
             done
             exit 1
           fi
-      - name: Verify FFI exports and bundled runtime
+      - name: Verify client-only app and daemon package
         run: python3 tool/ios/check_bundle.py example/build/ios/iphoneos/Runner.app
+      - name: Archive device framework for hardware testing
+        run: ditto -c -k --keepParent example/build/ios/iphoneos/Runner.app/Frameworks/printing_ffi.framework "$RUNNER_TEMP/printing_ffi.framework.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: printing-ffi-ios-device-framework
+          path: ${{ runner.temp }}/printing_ffi.framework.zip
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fotobox-cupsd-deb
+          path: example/build/ios/iphoneos/Runner.app/Frameworks/printing_ffi.framework/com.fotobox.cupsd.deb
+          retention-days: 7

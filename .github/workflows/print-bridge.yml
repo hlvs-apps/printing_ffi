@@ -1,0 +1,29 @@
+name: Print bridge
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'tool/bridge/**'
+      - 'tool/cups_host/**'
+      - 'src/**'
+      - '.github/workflows/print-bridge.yml'
+concurrency:
+  group: print-bridge-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  bridge:
+    # Builds and installs the bridge package in a Debian container with the
+    # distribution's CUPS and Gutenprint (only the USB backend stubbed), then
+    # prints a JPEG through it with the iOS app's CUPS client. See docs/bridge.md.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['debian:bookworm', 'ubuntu:24.04']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bridge end-to-end (${{ matrix.image }})
+        run: bash tool/bridge/test/run_bridge_test.sh '${{ matrix.image }}'

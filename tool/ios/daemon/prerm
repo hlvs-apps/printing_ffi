@@ -1,0 +1,15 @@
+#!/bin/sh
+# Stop the daemon before removal/upgrade so it releases the printer and port.
+set -e
+PATH=/var/jb/usr/bin:/var/jb/usr/sbin:/var/jb/bin:/var/jb/sbin:/usr/bin:/usr/sbin:/bin:/sbin:$PATH
+export PATH
+
+PLIST=/var/jb/Library/LaunchDaemons/com.fotobox.cupsd.plist
+
+case "$1" in
+	(remove|upgrade|deconfigure)
+	launchctl unload "$PLIST" 2>/dev/null || true
+	;;
+esac
+
+exit 0

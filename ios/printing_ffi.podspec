@@ -22,15 +22,32 @@ A Flutter plugin for direct printer communication using native FFI bindings for 
   s.dependency 'Flutter'
   s.platform = :ios, '14.0'
 
-  s.resources = 'Resources/CupsRuntime.bundle'
+  # The runtime and daemon package do not exist at pod install / Xcode build
+  # planning time. embed_runtime.sh copies the .deb explicitly after they are
+  # generated, rather than having Copy Resources snapshot a placeholder.
+  s.preserve_paths = 'Resources/CupsRuntime.bundle'
   s.frameworks = 'Foundation', 'CoreFoundation', 'Security', 'SystemConfiguration'
   s.libraries = 'z', 'iconv', 'resolv'
   stage = '$(PODS_TARGET_SRCROOT)/.build/arm64'
-  s.script_phase = {
+  s.script_phases = [{
     :name => 'Build bundled iOS CUPS and DNP drivers',
     :script => 'bash "${PODS_TARGET_SRCROOT}/../tool/ios/build.sh"',
     :execution_position => :before_compile,
-  }
+  }, {
+    # Build the on-device CUPS daemon .deb from the app build (printing_ffi is in
+    # pub-cache, not a separate checkout), so the app can ship + install it.
+    :name => 'Build on-device CUPS daemon package',
+    :script => 'bash "${PODS_TARGET_SRCROOT}/../tool/ios/daemon/build_daemon_deb.sh"',
+    :execution_position => :before_compile,
+  }, {
+    :name => 'Embed on-device CUPS daemon package',
+    :script => 'bash "${PODS_TARGET_SRCROOT}/../tool/ios/embed_runtime.sh"',
+    :execution_position => :after_compile,
+    :output_files => [
+      '$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/com.fotobox.cupsd.deb',
+    ],
+    :always_out_of_date => '1',
+  }]
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'SUPPORTED_PLATFORMS' => 'iphoneos',

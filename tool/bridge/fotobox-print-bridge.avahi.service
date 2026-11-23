@@ -1,0 +1,11 @@
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!-- How the Fotobox app finds this bridge on the LAN (CupsIos.findBridges).
+     A dedicated type, so the app lists print bridges, not every IPP printer. -->
+<service-group>
+  <name replace-wildcards="yes">Fotobox print bridge on %h</name>
+  <service>
+    <type>_fotobox-cups._tcp</type>
+    <port>631</port>
+  </service>
+</service-group>
