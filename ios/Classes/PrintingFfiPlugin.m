@@ -1,26 +1,29 @@
 #import "PrintingFfiPlugin.h"
 #include "../../src/printing_ffi.h"
 #include <cups/cups.h>
-#include <spawn.h>
-#include <sys/wait.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <signal.h>
-#include <unistd.h>
-#include <errno.h>
-#include <limits.h>
-#include <stdlib.h>
 #include <string.h>
 
-extern char **environ;
-extern int printing_ffi_ios_running(void);
+// The iOS app is a CUPS CLIENT only. It never runs cupsd, opens USB, or spawns
+// a process (iOS forbids a sandboxed app from both). It points the in-process
+// libcups client at an external CUPS host — a localhost jailbreak daemon, or a
+// LAN bridge — and submits over IPP. No USB/IOKit code or private entitlements
+// ship in the app.
 extern void printing_ffi_ios_select_server(void);
+extern void printing_ffi_ios_configure_server(const char *server);
+
+// Supported Gutenprint DNP / Citizen dye-sub drivers. The host names each queue
+// "<driver>_<serial>"; the client accepts a queue carrying one of these driver
+// ids and never a raw or wrong-model fallback. Mirrors the daemon's set and the
+// driver list the old on-device discovery used.
+static const char *const kSupportedDrivers[] = {
+    "citizen-cw-01", "citizen-cw-02", "citizen-cx-02", "citizen-cx-02w",
+    "citizen-cz-01", "dnp-ds40",      "dnp-ds80",      "dnp-ds80dx",
+    "dnp-dsrx1",     "dnp-ds620",     "dnp-ds820",     "dnp-qw410",
+    NULL,
+};
 
 @implementation PrintingFfiPlugin {
     dispatch_queue_t _worker;
-    NSString *_discovery;
-    NSString *_runtime;
 }
 
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar {
@@ -28,169 +31,73 @@ extern void printing_ffi_ios_select_server(void);
         methodChannelWithName:@"printing_ffi/ios_cups" binaryMessenger:registrar.messenger];
     PrintingFfiPlugin *plugin = [[PrintingFfiPlugin alloc] init];
     plugin->_worker = dispatch_queue_create("printing_ffi.ios_cups", DISPATCH_QUEUE_SERIAL);
-    NSBundle *bundle = [NSBundle bundleForClass:self];
-    plugin->_runtime = [bundle pathForResource:@"CupsRuntime" ofType:@"bundle"] ?:
-        [[NSBundle mainBundle] pathForResource:@"CupsRuntime" ofType:@"bundle"];
     [registrar addMethodCallDelegate:plugin channel:channel];
 }
 
-// No shell, jailbreak-name checks, root daemon, or loading private USB symbols
-// into Runner. A stock sandbox rejects this spawn and the app remains usable.
-- (NSString *)discover:(NSString **)reason {
-    if (printing_ffi_ios_running()) {
-        // A serial GCD queue can still execute its blocks on different threads.
-        // Refresh libcups' thread-local endpoint after a scheduler restart.
-        printing_ffi_ios_select_server();
-        // Do not claim a printer while CUPS owns an active job. Once idle,
-        // rediscover so replacing RX1 with DS620 selects the new model's PPD.
-        http_t *connection = httpConnect2(cupsServer(), ippPort(), NULL, AF_UNSPEC,
-            HTTP_ENCRYPTION_IF_REQUESTED, 1, 1000, NULL);
-        if (!connection) { *reason = @"CUPS health check failed"; return nil; }
-        httpSetTimeout(connection, 2.0, NULL, NULL);
-        cups_job_t *jobs = NULL;
-        int count = cupsGetJobs2(connection, &jobs, NULL, 0, CUPS_WHICHJOBS_ACTIVE);
-        ipp_status_t error = cupsLastError();
-        httpClose(connection);
-        if (count > 0) { cupsFreeJobs(count, jobs); return _discovery; }
-        if (count < 0 || error >= IPP_STATUS_ERROR_BAD_REQUEST) {
-            *reason = @"CUPS health check failed"; return nil;
-        }
-    } else {
-        _discovery = nil;
-    }
-    NSString *backend = [_runtime stringByAppendingPathComponent:@"bin/libcupsbe_gutenprint53usb.so"];
-    if (!_runtime) {
-        *reason = [NSString stringWithFormat:@"CUPS runtime bundle not found in %@ or %@",
-            [NSBundle bundleForClass:[self class]].bundlePath, [NSBundle mainBundle].bundlePath];
-        return nil;
-    }
-    if (![[NSFileManager defaultManager] fileExistsAtPath:backend]) {
-        *reason = [NSString stringWithFormat:@"Bundled USB backend file is missing: %@", backend];
-        return nil;
-    }
-    // Attempt the launch itself. An execute-access preflight is not a spawn:
-    // jailbreak launch hooks can establish executable trust during posix_spawn.
-    // Returning here on isExecutableFileAtPath would bypass those hooks.
-    char output[PATH_MAX];
-    snprintf(output, sizeof(output), "%sprinting-cups-XXXXXX", NSTemporaryDirectory().fileSystemRepresentation);
-    int fd = mkstemp(output);
-    if (fd < 0) { *reason = @"Cannot create USB discovery output"; return nil; }
-    unlink(output);
-    fcntl(fd, F_SETFD, FD_CLOEXEC);
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_adddup2(&actions, fd, STDOUT_FILENO);
-    // Preserve libusb/dyld diagnostics as well as discovery records. The Dart
-    // parser accepts only lines beginning with "direct".
-    posix_spawn_file_actions_adddup2(&actions, fd, STDERR_FILENO);
-    // The backend's new URI form identifies the precise Gutenprint model.
-    // Explicit environment avoids inherited DEVICE_URI/test-mode variables.
-    char *const env[] = {"PATH=/usr/bin:/bin", "LANG=C", "OLD_URI_SCHEME=0", NULL};
-    // Gutenprint uses argv[0]'s basename as the discovery URI scheme. The
-    // packaged filename is an implementation detail, not a CUPS backend name.
-    char *const argv[] = {"gutenprint53+usb", NULL};
-    pid_t pid = -1;
-    int error = posix_spawn(&pid, backend.fileSystemRepresentation, &actions, NULL, argv, env);
-    posix_spawn_file_actions_destroy(&actions);
-    if (error) {
-        close(fd);
-        struct stat info;
-        NSString *permissions = stat(backend.fileSystemRepresentation, &info) == 0 ?
-            [NSString stringWithFormat:@"mode %04o, owner %u:%u",
-                (unsigned)(info.st_mode & 07777), (unsigned)info.st_uid, (unsigned)info.st_gid] :
-            @"file attributes unavailable";
-        *reason = [NSString stringWithFormat:
-            @"USB helper posix_spawn failed: %s (errno %d; %@; app uid %u, euid %u)",
-            strerror(error), error, permissions, (unsigned)getuid(), (unsigned)geteuid()];
-        return nil;
-    }
-    int status = 0;
-    pid_t done = 0;
-    for (int i = 0; i < 100 && done == 0; ++i) {
-        done = waitpid(pid, &status, WNOHANG);
-        if (done == 0) usleep(100000);
-    }
-    if (done != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        if (done == 0) { kill(pid, SIGKILL); waitpid(pid, NULL, 0); }
-        char diagnostic[4096];
-        ssize_t size = pread(fd, diagnostic, sizeof(diagnostic) - 1, 0);
-        diagnostic[size > 0 ? size : 0] = '\0';
-        close(fd);
-        NSString *termination = done == 0 ? @"timed out" :
-            (done < 0 ? @"wait failed" :
-             (WIFSIGNALED(status) ? [NSString stringWithFormat:@"signal %d", WTERMSIG(status)] :
-              [NSString stringWithFormat:@"exit %d", WEXITSTATUS(status)]));
-        *reason = [NSString stringWithFormat:@"USB discovery %@: %s", termination, diagnostic];
-        return nil;
-    }
-    char bytes[65537];
-    ssize_t length = pread(fd, bytes, sizeof(bytes), 0);
-    close(fd);
-    if (length < 0 || length == sizeof(bytes)) {
-        *reason = @"Invalid USB discovery response";
-        return nil;
-    }
-    _discovery = [[NSString alloc] initWithBytes:bytes length:(NSUInteger)length encoding:NSUTF8StringEncoding];
-    return _discovery;
+// Point the in-process libcups client at the external CUPS host. "server" is
+// "host" or "host:port"; cupsSetServer parses the port. Cheap and local — it
+// only stores the target, no network I/O.
+- (void)configure:(NSDictionary *)arguments {
+    NSString *server = arguments[@"server"];
+    printing_ffi_ios_configure_server(server.length ? server.UTF8String : "");
 }
 
-- (id)start:(NSDictionary *)arguments {
-    NSString *uri = arguments[@"uri"];
-    NSString *driver = arguments[@"driver"];
-    NSString *queue = arguments[@"queueName"];
-    // start is accepted only for a device this exact bundled backend opened.
-    NSString *prefix = [NSString stringWithFormat:@"direct %@ ", uri];
-    BOOL discovered = NO;
-    for (NSString *line in [_discovery componentsSeparatedByString:@"\n"]) {
-        if ([line hasPrefix:prefix]) discovered = YES;
+// Ask the configured host which supported DNP queue it exposes. The host ran USB
+// discovery and created the queue "<driver>_<serial>"; the client reads it back
+// over IPP. Returns {queueName, driver} for a supported queue, {detail} when the
+// host is reachable but exposes none, or a FlutterError when it is unreachable.
+- (id)probe {
+    printing_ffi_ios_select_server();
+    http_t *http = httpConnect2(cupsServer(), ippPort(), NULL, AF_UNSPEC,
+        HTTP_ENCRYPTION_IF_REQUESTED, 1, 3000, NULL);
+    if (!http) {
+        return [FlutterError errorWithCode:@"unavailable"
+            message:[NSString stringWithFormat:@"CUPS host %s:%d unreachable",
+                cupsServer(), ippPort()]
+            details:nil];
     }
-    NSCharacterSet *invalid = [[NSCharacterSet characterSetWithCharactersInString:
-        @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"] invertedSet];
-    if (!discovered || !driver.length || !queue.length || queue.length > 127 ||
-        [driver rangeOfCharacterFromSet:invalid].location != NSNotFound ||
-        [queue rangeOfCharacterFromSet:invalid].location != NSNotFound) {
-        return [FlutterError errorWithCode:@"unavailable" message:@"Printer access was not established" details:nil];
+    httpSetTimeout(http, 3.0, NULL, NULL);
+    cups_dest_t *dests = NULL;
+    int count = cupsGetDests2(http, &dests);
+    ipp_status_t error = cupsLastError();
+    NSString *queueName = nil;
+    NSString *driver = nil;
+    for (int i = 0; i < count && !queueName; i++) {
+        const char *name = dests[i].name;
+        if (!name) continue;
+        for (const char *const *d = kSupportedDrivers; *d; d++) {
+            size_t len = strlen(*d);
+            // "<driver>_..." — the host's queue-naming scheme.
+            if (strncmp(name, *d, len) == 0 && name[len] == '_') {
+                queueName = [NSString stringWithUTF8String:name];
+                driver = [NSString stringWithUTF8String:*d];
+                break;
+            }
+        }
     }
-    NSString *root = [NSSearchPathForDirectoriesInDomains(NSLibraryDirectory,
-        NSUserDomainMask, YES).firstObject stringByAppendingPathComponent:@"printing_ffi/cups"];
-    NSString *bin = [_runtime stringByAppendingPathComponent:@"bin"];
-    NSString *doc = [_runtime stringByAppendingPathComponent:@"share/doc/cups"];
-    int port = start_cups_server(root.fileSystemRepresentation, bin.fileSystemRepresentation,
-        _runtime.fileSystemRepresentation, doc.fileSystemRepresentation);
-    if (port <= 0) return [FlutterError errorWithCode:@"unavailable"
-        message:[NSString stringWithUTF8String:get_last_error()] details:nil];
-
-    cups_dest_t *existing = cupsGetNamedDest(NULL, queue.UTF8String, NULL);
-    BOOL configured = existing != NULL;
-    if (existing) {
-        const char *current = cupsGetOption("device-uri", existing->num_options, existing->options);
-        configured = current && strcmp(current, uri.UTF8String) == 0;
-        cupsFreeDests(1, existing);
+    if (count > 0) cupsFreeDests(count, dests);
+    httpClose(http);
+    if (queueName) return @{@"queueName": queueName, @"driver": driver};
+    if (count < 0 || error >= IPP_STATUS_ERROR_BAD_REQUEST) {
+        return [FlutterError errorWithCode:@"unavailable"
+            message:@"CUPS host query failed" details:nil];
     }
-    if (!configured) {
-        const char *ppd = generate_cups_dnp_ppd(driver.UTF8String);
-        configured = ppd && add_cups_printer(queue.UTF8String, uri.UTF8String, ppd);
-    }
-    if (!configured) {
-        NSString *message = [NSString stringWithUTF8String:get_last_error()];
-        stop_cups_server();
-        return [FlutterError errorWithCode:@"unavailable" message:message details:nil];
-    }
-    return @{@"port": @(port)};
+    return @{@"detail": @"no supported DNP queue on host"};
 }
 
 - (void)handleMethodCall:(FlutterMethodCall *)call result:(FlutterResult)result {
-    if (![call.method isEqualToString:@"discover"] && ![call.method isEqualToString:@"start"]) {
+    if (![call.method isEqualToString:@"configure"] &&
+        ![call.method isEqualToString:@"probe"]) {
         result(FlutterMethodNotImplemented);
         return;
     }
     dispatch_async(_worker, ^{
         id value;
-        if ([call.method isEqualToString:@"discover"]) {
-            NSString *reason = @"USB printer access unavailable";
-            value = [self discover:&reason] ?: [FlutterError errorWithCode:@"unavailable" message:reason details:nil];
+        if ([call.method isEqualToString:@"configure"]) {
+            [self configure:call.arguments];
+            value = nil;
         } else {
-            value = [self start:call.arguments];
+            value = [self probe];
         }
         dispatch_async(dispatch_get_main_queue(), ^{ result(value); });
     });

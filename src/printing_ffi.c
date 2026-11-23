@@ -1469,14 +1469,37 @@ static pid_t g_cupsd_pid = 0;
 // The localhost port cupsd is listening on (chosen at start time).
 #ifdef PRINTING_FFI_IOS
 #include <stdatomic.h>
-static _Atomic int g_cupsd_port = 0;
-// libcups keeps its server per thread. Dart worker threads can outlive cupsd.
+#include <pthread.h>
+static _Atomic int g_cupsd_port = 0; // daemon build only; unused by the app client
+// The external CUPS host ("host" or "host:port") the client targets: a localhost
+// jailbreak daemon, or a LAN bridge. Set by printing_ffi_ios_configure_server;
+// empty until then, which keeps every libcups call off a system CUPS endpoint.
+static pthread_mutex_t g_remote_server_lock = PTHREAD_MUTEX_INITIALIZER;
+static char g_remote_server[128] = {0};
+
+// libcups keeps its target server per thread, and Dart worker threads come and
+// go, so every native op selects the configured host before touching libcups.
 FFI_PLUGIN_EXPORT void printing_ffi_ios_select_server(void) {
-    int port = atomic_load(&g_cupsd_port);
-    char server[64];
-    // Never fall back to a system CUPS endpoint when the optional runtime stops.
-    snprintf(server, sizeof(server), "127.0.0.1:%d", port > 0 ? port : 1);
-    cupsSetServer(server);
+    char server[128];
+    pthread_mutex_lock(&g_remote_server_lock);
+    // "255.255.255.255:0" is unroutable: an unconfigured client never reaches a
+    // system CUPS endpoint by accident.
+    snprintf(server, sizeof(server), "%s",
+             g_remote_server[0] ? g_remote_server : "255.255.255.255:0");
+    pthread_mutex_unlock(&g_remote_server_lock);
+    cupsSetServer(server); // parses the ":port" suffix into ippPort()
+}
+
+// Store the external CUPS host endpoint. Thread-safe; applied per worker by
+// printing_ffi_ios_select_server. Pass "" to clear it.
+FFI_PLUGIN_EXPORT void printing_ffi_ios_configure_server(const char *server) {
+    pthread_mutex_lock(&g_remote_server_lock);
+    if (server && *server) {
+        snprintf(g_remote_server, sizeof(g_remote_server), "%s", server);
+    } else {
+        g_remote_server[0] = '\0';
+    }
+    pthread_mutex_unlock(&g_remote_server_lock);
 }
 #else
 static int g_cupsd_port = 0;
