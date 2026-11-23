@@ -175,8 +175,16 @@ for name in cups usb jpeg png filters gutenprint; do
     [[ ! -f "$BUILD/$name/$license" ]] || cp -f "$BUILD/$name/$license" "$RUNTIME/licenses/$name-$license"
   done
 done
-# Ad-hoc signatures are replaced with the jailbreak's accepted signatures when
-# installing. Keep privileged helper entitlements OUT of the Runner application.
+# These helpers are ad-hoc signed with the privileged USB/IOKit entitlements
+# the Gutenprint backend needs. On a jailbroken device the jailbreak trusts the
+# ad-hoc cdhash the first time a jailbroken-context process spawns it (it is
+# then added to the dynamic trustcache), so AMFI allows the exec thereafter.
+#
+# The USB/IOKit entitlements stay HERE, on the helpers, and are deliberately NOT
+# on Runner. But note Runner cannot be a normal sandboxed app: iOS denies a
+# container app process-fork/process-exec of ANY child (EPERM), so Runner needs
+# com.apple.private.security.no-sandbox (see the app's Runner.entitlements) or it
+# can never spawn cupsd, the filters, or this backend in the first place.
 for binary in "$RUNTIME/bin/"*; do
   xcrun lipo "$binary" -verify_arch arm64
   if xcrun otool -L "$binary" | tail -n +2 | awk '{print $1}' | grep -Ev '^(/usr/lib/|/System/Library/)' ; then

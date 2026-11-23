@@ -27,10 +27,24 @@ its bundled executables and permit the backend's IOKit USB access.
 
 The USB library is linked into a separate helper, not the app framework. Stock
 iOS can load the app without loading private USB code; a denied helper launch
-is returned as unavailable printing. Privileged helper entitlements are never
-added to Runner. For a jailbreak deployment, sign/trust **all** executables under
-`CupsRuntime.bundle/bin` using that jailbreak's installation mechanism. Ad-hoc
-build signatures are not a claim that a particular jailbreak will trust them.
+is returned as unavailable printing.
+
+**Runner must run unsandboxed.** iOS denies a sandboxed container app
+`process-fork`/`process-exec` of any child — `posix_spawn` returns `EPERM`
+before the child's own entitlements or trust ever matter — so the app cannot
+launch cupsd, the filters or the Gutenprint backend at all while sandboxed. The
+app therefore carries `com.apple.private.security.no-sandbox` in
+`Runner.entitlements`. Apple does not grant this entitlement, so it is honored
+only on a jailbroken device; that is the entire premise of bundled USB printing.
+The privileged USB/IOKit entitlements stay on the helper, not on Runner.
+
+For a jailbreak deployment, trust **all** executables under
+`CupsRuntime.bundle/bin` using that jailbreak's installation mechanism. On
+Dopamine the ad-hoc helper cdhash is added to the dynamic trustcache the first
+time a jailbroken-context process spawns it, so once Runner is unsandboxed (and
+injected, which a SpringBoard launch or a hooked debugserver provides) it can
+spawn and auto-trust the pipeline. Ad-hoc build signatures are not a claim that
+a particular jailbreak will trust them.
 
 CUPS listens only on an ephemeral loopback port. Config, spool and printer
 settings live under the app's Library/printing_ffi directory. The scheduler
