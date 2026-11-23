@@ -4,6 +4,7 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
@@ -67,10 +68,9 @@ extern void printing_ffi_ios_select_server(void);
         *reason = [NSString stringWithFormat:@"Bundled USB backend file is missing: %@", backend];
         return nil;
     }
-    if (![[NSFileManager defaultManager] isExecutableFileAtPath:backend]) {
-        *reason = [NSString stringWithFormat:@"Bundled USB backend exists but execution is denied: %@", backend];
-        return nil;
-    }
+    // Attempt the launch itself. An execute-access preflight is not a spawn:
+    // jailbreak launch hooks can establish executable trust during posix_spawn.
+    // Returning here on isExecutableFileAtPath would bypass those hooks.
     char output[PATH_MAX];
     snprintf(output, sizeof(output), "%sprinting-cups-XXXXXX", NSTemporaryDirectory().fileSystemRepresentation);
     int fd = mkstemp(output);
@@ -92,7 +92,14 @@ extern void printing_ffi_ios_select_server(void);
     posix_spawn_file_actions_destroy(&actions);
     if (error) {
         close(fd);
-        *reason = [NSString stringWithFormat:@"USB helper execution unavailable: %s", strerror(error)];
+        struct stat info;
+        NSString *permissions = stat(argv[0], &info) == 0 ?
+            [NSString stringWithFormat:@"mode %04o, owner %u:%u",
+                (unsigned)(info.st_mode & 07777), (unsigned)info.st_uid, (unsigned)info.st_gid] :
+            @"file attributes unavailable";
+        *reason = [NSString stringWithFormat:
+            @"USB helper posix_spawn failed: %s (errno %d; %@; app uid %u, euid %u)",
+            strerror(error), error, permissions, (unsigned)getuid(), (unsigned)geteuid()];
         return nil;
     }
     int status = 0;
