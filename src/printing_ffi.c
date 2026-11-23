@@ -1476,18 +1476,70 @@ static _Atomic int g_cupsd_port = 0; // daemon build only; unused by the app cli
 // empty until then, which keeps every libcups call off a system CUPS endpoint.
 static pthread_mutex_t g_remote_server_lock = PTHREAD_MUTEX_INITIALIZER;
 static char g_remote_server[128] = {0};
+// The CUPS user and password the host asks for. A LAN bridge requires them
+// (HTTP Basic, a user in its admin group, the bridge token as password); the
+// loopback daemon asks for none. Empty = answer no authentication request.
+static char g_remote_user[64] = {0};
+static char g_remote_password[128] = {0};
 
-// libcups keeps its target server per thread, and Dart worker threads come and
-// go, so every native op selects the configured host before touching libcups.
+// The request the password callback last answered on this thread. libcups
+// calls the callback again when the server rejects the password, and for HTTP
+// Basic it never gives up by itself (it expects a person to cancel), so a
+// second call for the same connection and request means the token was wrong.
+// Reset per native op by printing_ffi_ios_select_server.
+static __thread const http_t *g_auth_http = NULL;
+static __thread char g_auth_request[512];
+
+// libcups password callback: the configured password, once per request. libcups
+// copies the result immediately, so a per-thread buffer is enough. NULL cancels
+// the request, which is how a host that wants credentials we lack (or rejects
+// ours) is reported.
+static const char *printing_ffi_ios_password(const char *prompt, http_t *http,
+                                             const char *method, const char *resource,
+                                             void *data) {
+    (void)prompt; (void)data;
+    char request[sizeof(g_auth_request)];
+    snprintf(request, sizeof(request), "%s %s", method ? method : "",
+             resource ? resource : "");
+    if (http == g_auth_http && strcmp(request, g_auth_request) == 0)
+        return NULL; // refused once already: do not loop on a wrong token
+    g_auth_http = http;
+    snprintf(g_auth_request, sizeof(g_auth_request), "%s", request);
+    static __thread char password[128];
+    pthread_mutex_lock(&g_remote_server_lock);
+    snprintf(password, sizeof(password), "%s", g_remote_password);
+    pthread_mutex_unlock(&g_remote_server_lock);
+    return password[0] ? password : NULL;
+}
+
+// libcups keeps its target server (and user, and password callback) per
+// thread, and Dart worker threads come and go, so every native op selects the
+// configured host before touching libcups.
 FFI_PLUGIN_EXPORT void printing_ffi_ios_select_server(void) {
     char server[128];
+    char user[64];
     pthread_mutex_lock(&g_remote_server_lock);
     // "255.255.255.255:0" is unroutable: an unconfigured client never reaches a
     // system CUPS endpoint by accident.
     snprintf(server, sizeof(server), "%s",
              g_remote_server[0] ? g_remote_server : "255.255.255.255:0");
+    snprintf(user, sizeof(user), "%s", g_remote_user);
     pthread_mutex_unlock(&g_remote_server_lock);
     cupsSetServer(server); // parses the ":port" suffix into ippPort()
+    cupsSetUser(user[0] ? user : NULL); // NULL: back to the device's own user
+    cupsSetPasswordCB2(printing_ffi_ios_password, NULL);
+    g_auth_http = NULL; // a new op may answer a password request again
+    g_auth_request[0] = '\0';
+}
+
+// Store the credentials for the configured host (a LAN bridge's user + token).
+// Pass NULL or "" for a host that needs none. Thread-safe, like the server.
+FFI_PLUGIN_EXPORT void printing_ffi_ios_configure_credentials(const char *user,
+                                                              const char *password) {
+    pthread_mutex_lock(&g_remote_server_lock);
+    snprintf(g_remote_user, sizeof(g_remote_user), "%s", user ? user : "");
+    snprintf(g_remote_password, sizeof(g_remote_password), "%s", password ? password : "");
+    pthread_mutex_unlock(&g_remote_server_lock);
 }
 
 // Store the external CUPS host endpoint. Thread-safe; applied per worker by
@@ -1542,6 +1594,17 @@ FFI_PLUGIN_EXPORT int32_t printing_ffi_ios_probe(char *queue, size_t queue_cap,
     if (count > 0) cupsFreeDests(count, dests);
     httpClose(http);
     if (pick) return 1;
+    if (error == IPP_STATUS_ERROR_NOT_AUTHORIZED ||
+        error == IPP_STATUS_ERROR_CUPS_AUTHENTICATION_CANCELED) {
+        set_last_error("CUPS host %s:%d needs its print bridge token (missing or wrong)",
+                       cupsServer(), ippPort());
+        return -1;
+    }
+    if (error == IPP_STATUS_ERROR_FORBIDDEN) {
+        set_last_error("CUPS host %s:%d refuses this device (not on its local network)",
+                       cupsServer(), ippPort());
+        return -1;
+    }
     if (count < 0 || error >= IPP_STATUS_ERROR_BAD_REQUEST) {
         set_last_error("CUPS host %s:%d query failed: %s", cupsServer(), ippPort(),
                        cupsLastErrorString());

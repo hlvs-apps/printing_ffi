@@ -17,6 +17,7 @@ assert framework.is_file(), f'Missing FFI framework: {framework}'
 symbols = subprocess.check_output(['xcrun', 'nm', '-gU', str(framework)], text=True)
 for symbol in ('get_printers', 'get_print_jobs', 'submit_raw_data_job',
                'printing_ffi_ios_select_server', 'printing_ffi_ios_configure_server',
+               'printing_ffi_ios_configure_credentials',
                'printing_ffi_ios_probe'):
     assert any(line.endswith(' _' + symbol) for line in symbols.splitlines()), symbol
 

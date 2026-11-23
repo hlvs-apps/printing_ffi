@@ -3,7 +3,7 @@
 <!-- LaunchDaemon for the on-device CUPS host (topology L). Launched by the
      jailbreak's hooked launchd, so it runs outside the app sandbox and the
      binaries it spawns are trusted on exec. Runs as mobile: the CUPS runtime
-     expects a non-root cupsd (see fotobox_cupsd.c). KeepAlive restarts it; it
+     expects a non-root cupsd (see tool/cups_host/fotobox_cupsd.c). KeepAlive restarts it; it
      outlives the app because it is a daemon, not an app. -->
 <plist version="1.0">
 <dict>

@@ -189,4 +189,81 @@ void main() {
     expect(servers, ['127.0.0.1:6310', '10.0.0.5:6310']);
     cups.dispose();
   });
+
+  test('a LAN bridge is configured with its user and token', () async {
+    final configured = <Map<String, dynamic>?>[];
+    final cups = CupsIos.forTest(
+      invoke: (method, arguments) async {
+        if (method == 'configure') {
+          configured.add(arguments);
+          return null;
+        }
+        return {'queueName': 'dnp-dsrx1_52583120', 'model': 'DNP DS-RX1'};
+      },
+    );
+    expect(await cups.useServer('booth-pi.local:631', token: ' abcd-efgh '), true);
+    expect(cups.onDevice, false);
+    expect(configured.last, {
+      'server': 'booth-pi.local:631',
+      'user': kBridgeUser,
+      'token': 'abcd-efgh',
+    });
+    expect(cups.status.value, contains('booth-pi.local:631'));
+    // Back on the device: no credentials go to the loopback daemon.
+    expect(await cups.useServer(kDefaultCupsServer), true);
+    expect(cups.onDevice, true);
+    expect(configured.last, {'server': kDefaultCupsServer, 'user': null, 'token': null});
+    cups.dispose();
+  });
+
+  test('a new token alone re-probes the same host', () async {
+    var probes = 0;
+    final cups = CupsIos.forTest(
+      invoke: (method, arguments) async {
+        if (method == 'configure') return null;
+        probes++;
+        return {'queueName': 'q'};
+      },
+    );
+    await cups.useServer('10.0.0.5:631', token: 'one');
+    expect(cups.queueName, 'q');
+    await cups.useServer('10.0.0.5:631', token: 'two');
+    expect(cups.token, 'two');
+    expect(probes, 2);
+    cups.dispose();
+  });
+
+  test('findBridges keeps resolved bridges and drops malformed entries', () async {
+    final cups = CupsIos.forTest(
+      invoke: (method, arguments) async {
+        expect(method, 'browse');
+        expect(arguments!['seconds'], 2.5);
+        return [
+          {'name': 'Fotobox print bridge on booth-pi', 'host': 'booth-pi.local', 'port': 631},
+          {'host': '10.0.0.9', 'port': 631},
+          {'name': 'no host', 'port': 631},
+          {'name': 'bad port', 'host': 'x.local', 'port': '631'},
+          'garbage',
+        ];
+      },
+    );
+    final bridges = await cups.findBridges(timeout: const Duration(milliseconds: 2500));
+    expect(bridges.map((b) => b.endpoint), ['booth-pi.local:631', '10.0.0.9:631']);
+    expect(bridges.first.name, 'Fotobox print bridge on booth-pi');
+    expect(bridges.last.name, '10.0.0.9');
+    cups.dispose();
+  });
+
+  test('pairing links reach listeners; malformed ones are ignored', () async {
+    final cups = CupsIos.forTest(invoke: (method, arguments) async => null);
+    final received = <CupsPairing>[];
+    final sub = cups.pairings.listen(received.add);
+    cups.receivePairing({'server': 'booth-pi.local:631', 'token': 'abcd'});
+    cups.receivePairing({'token': 'no server'});
+    cups.receivePairing(null);
+    await Future<void>.delayed(Duration.zero);
+    expect(received.map((p) => '${p.server} ${p.token}'), ['booth-pi.local:631 abcd']);
+    await sub.cancel();
+    cups.dispose();
+  });
 }

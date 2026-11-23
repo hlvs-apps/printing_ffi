@@ -8,7 +8,8 @@ import 'package:printing_ffi/printing_ffi_bindings_generated.dart' hide PrinterA
 import 'models/models.dart';
 import 'src/cups_android.dart';
 import 'src/cups_ios.dart';
-export 'src/cups_ios.dart' show CupsIos, CupsDaemonInstall;
+export 'src/cups_ios.dart'
+    show CupsIos, CupsDaemonInstall, CupsBridge, CupsPairing, kBridgeUser, kDefaultCupsServer;
 import 'src/dnp_usb.dart';
 
 export 'models/models.dart';

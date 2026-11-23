@@ -1,0 +1,52 @@
+#!/bin/sh
+# Configure this box as a Fotobox print bridge: the CUPS user the app signs in
+# as, its token, the LAN cupsd configuration, and the queue manager service.
+set -e
+
+USER_NAME=fotobox-print
+TOKEN_DIR=/etc/fotobox-print-bridge
+CONF=/etc/cups/cupsd.conf
+
+case "$1" in
+	(configure)
+	# The app authenticates (HTTP Basic, PAM) as this user. Membership of the
+	# CUPS admin group (SystemGroup, lpadmin on Debian) lets it pause, resume
+	# and re-enable the printer, as it does on the device. It cannot log in.
+	if ! getent passwd "$USER_NAME" >/dev/null; then
+		useradd --system --no-create-home --home-dir /nonexistent \
+			--shell /usr/sbin/nologin --groups lpadmin "$USER_NAME"
+	fi
+	# The token is that user's password. Typeable on an iPad: 16 characters
+	# a-z0-9 in groups of four (~82 bits). Keep an existing one on upgrade;
+	# edit the file and run `dpkg-reconfigure fotobox-print-bridge` to change it.
+	mkdir -p "$TOKEN_DIR"
+	chmod 0700 "$TOKEN_DIR"
+	if [ ! -s "$TOKEN_DIR/token" ]; then
+		umask 077
+		tr -dc 'a-z0-9' </dev/urandom | head -c 16 | sed 's/..../&-/g; s/-$//' >"$TOKEN_DIR/token"
+		echo >>"$TOKEN_DIR/token"
+	fi
+	chmod 0600 "$TOKEN_DIR/token"
+	echo "$USER_NAME:$(head -n1 "$TOKEN_DIR/token")" | chpasswd
+
+	# Share on the LAN, token-protected. Keep the original for purge.
+	if [ -e "$CONF" ] && [ ! -e "$CONF.fotobox-orig" ]; then
+		cp -p "$CONF" "$CONF.fotobox-orig"
+	fi
+	install -m 0640 -o root -g lp /usr/share/fotobox-print-bridge/cupsd.conf "$CONF"
+
+	deb-systemd-helper unmask fotobox-print-bridge.service >/dev/null || true
+	deb-systemd-helper enable fotobox-print-bridge.service >/dev/null || true
+	if [ -d /run/systemd/system ]; then
+		systemctl daemon-reload
+		systemctl enable cups.service >/dev/null 2>&1 || true
+		systemctl restart cups.service
+		systemctl restart fotobox-print-bridge.service
+	fi
+
+	echo
+	/usr/sbin/fotobox-print-bridge-pair || true
+	;;
+esac
+
+exit 0

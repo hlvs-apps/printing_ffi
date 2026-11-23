@@ -1,0 +1,11 @@
+#!/bin/sh
+# Stop the queue manager before removal or upgrade. cupsd and its queues stay.
+set -e
+case "$1" in
+	(remove|upgrade|deconfigure)
+	if [ -d /run/systemd/system ]; then
+		systemctl stop fotobox-print-bridge.service || true
+	fi
+	;;
+esac
+exit 0

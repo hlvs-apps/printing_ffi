@@ -5,10 +5,36 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 /// The loopback endpoint the on-device CUPS daemon listens on (topology L: a
-/// jailbreak LaunchDaemon on the same device). LAN hosts (topologies B/A: a
-/// Linux/Pi bridge or the Android app) override it with a discovered or
-/// entered `host:port`.
+/// jailbreak LaunchDaemon on the same device). A LAN print bridge (topology B,
+/// `tool/bridge/`) replaces it with a found, paired or entered `host:port`.
 const String kDefaultCupsServer = '127.0.0.1:6310';
+
+/// The CUPS user a LAN print bridge knows the app as; the bridge's token is its
+/// password (HTTP Basic, see `tool/bridge/cupsd.conf`).
+const String kBridgeUser = 'fotobox-print';
+
+/// A print bridge found on the LAN (it advertises `_fotobox-cups._tcp`).
+@immutable
+class CupsBridge {
+  const CupsBridge({required this.name, required this.host, required this.port});
+
+  /// The advertised name, e.g. "Fotobox print bridge on booth-pi".
+  final String name;
+  final String host;
+  final int port;
+
+  /// What [CupsIos.useServer] takes.
+  String get endpoint => '$host:$port';
+}
+
+/// A bridge's pairing link (`fotobox-cups://pair?server=...&token=...`), read
+/// from the QR code `fotobox-print-bridge-pair` prints, via the Camera app.
+@immutable
+class CupsPairing {
+  const CupsPairing({required this.server, required this.token});
+  final String server;
+  final String token;
+}
 
 /// Outcome of [CupsIos.installDaemon].
 enum CupsDaemonInstall {
@@ -55,8 +81,20 @@ class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
   final status = ValueNotifier<String>('CUPS: not started');
 
   /// The CUPS host endpoint (`host:port`). Defaults to the localhost daemon;
-  /// set via [useServer] to a LAN host for the bridge topologies.
+  /// set via [useServer] to a LAN print bridge.
   String server = kDefaultCupsServer;
+
+  /// The LAN bridge's token, sent as [kBridgeUser]'s password. Null for the
+  /// on-device daemon, which asks for none.
+  String? token;
+
+  /// Whether [server] is the on-device daemon rather than a LAN bridge.
+  bool get onDevice => server == kDefaultCupsServer;
+
+  /// Pairing links opened while the app runs (or that launched it). The app
+  /// decides whether to [useServer] them and to remember them.
+  Stream<CupsPairing> get pairings => _pairings.stream;
+  final _pairings = StreamController<CupsPairing>.broadcast();
 
   String? queueName;
   String? _model;
@@ -80,14 +118,50 @@ class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
         _ => CupsDaemonInstall.noPackageManager,
       };
 
-  /// Point the client at a different CUPS host (LAN bridge). Re-probes.
-  Future<bool> useServer(String endpoint) {
-    if (endpoint != server) {
+  /// Point the client at a different CUPS host: a LAN bridge with its
+  /// [token], or [kDefaultCupsServer] for the on-device daemon. Re-probes.
+  Future<bool> useServer(String endpoint, {String? token}) {
+    final cleaned = (token == null || token.trim().isEmpty) ? null : token.trim();
+    if (endpoint != server || cleaned != this.token) {
       server = endpoint;
+      this.token = cleaned;
       queueName = null;
       _model = null;
     }
     return initialize();
+  }
+
+  /// Look for print bridges on the LAN (DNS-SD `_fotobox-cups._tcp`) for
+  /// [timeout]. Needs the app's Local Network permission; throws a
+  /// [PlatformException] when iOS refuses the browse.
+  Future<List<CupsBridge>> findBridges({
+    Duration timeout = const Duration(seconds: 3),
+  }) async {
+    final found = await _call('browse', {'seconds': timeout.inMilliseconds / 1000});
+    if (found is! List) return const [];
+    return [
+      for (final bridge in found)
+        if (bridge is Map &&
+            bridge['host'] is String &&
+            (bridge['host'] as String).isNotEmpty &&
+            bridge['port'] is int)
+          CupsBridge(
+            name: bridge['name'] is String ? bridge['name'] as String : bridge['host'] as String,
+            host: bridge['host'] as String,
+            port: bridge['port'] as int,
+          ),
+    ];
+  }
+
+  /// A pairing link from the native side (`{server, token}`); anything else is
+  /// ignored.
+  @visibleForTesting
+  void receivePairing(Object? link) {
+    if (link is! Map) return;
+    final server = link['server'];
+    final token = link['token'];
+    if (server is! String || server.isEmpty) return;
+    _pairings.add(CupsPairing(server: server, token: token is String ? token : ''));
   }
 
   /// Call after the first frame on the main engine. Re-probes the host while
@@ -97,6 +171,12 @@ class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
     if (!Platform.isIOS || _observing) return;
     _observing = true;
     WidgetsBinding.instance.addObserver(this);
+    _channel.setMethodCallHandler((call) async {
+      if (call.method != 'paired') throw MissingPluginException();
+      receivePairing(call.arguments);
+    });
+    // A pairing link that launched the app arrived before this handler.
+    unawaited(_call('takePairing').then(receivePairing, onError: (_) {}));
     _resume();
   }
 
@@ -132,7 +212,11 @@ class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
     var stage = 'connect';
     try {
       // Point libcups at the host. Cheap and local; it only stores the target.
-      await _call('configure', {'server': server});
+      await _call('configure', {
+        'server': server,
+        'user': token == null ? null : kBridgeUser,
+        'token': token,
+      });
       stage = 'printer discovery';
       // Ask the host which queue to print to. The host (daemon or bridge) ran
       // the USB discovery and created the queue; the app only reads it back
@@ -174,6 +258,7 @@ class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
   void dispose() {
     _retry?.cancel();
     if (_observing) WidgetsBinding.instance.removeObserver(this);
+    unawaited(_pairings.close());
     status.dispose();
     super.dispose();
   }

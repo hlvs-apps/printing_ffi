@@ -33,7 +33,7 @@ if [[ -z "$DPKG_DEB" ]]; then
 fi
 
 # Skip if the .deb is newer than every input (keeps rebuilds cheap).
-newest_input=$(ls -t "$0" "$TASK_DIR/fotobox_cupsd.c" "$PLUGIN/src/printing_ffi.c" \
+newest_input=$(ls -t "$0" "$PLUGIN/tool/cups_host/fotobox_cupsd.c" "$PLUGIN/src/printing_ffi.c" \
   "$TASK_DIR/control" "$TASK_DIR/postinst" "$TASK_DIR/prerm" "$TASK_DIR/postrm" \
   "$TASK_DIR/com.fotobox.cupsd.plist" "$TASK_DIR/daemon.entitlements" \
   "$RUNTIME/bin/libcupsd.so" 2>/dev/null | head -1 || true)
@@ -52,7 +52,7 @@ trap 'rm -rf "$WORK"' EXIT
 "$CC" -arch arm64 -isysroot "$SDK" -miphoneos-version-min="$IOS_MIN" \
   -D_DARWIN_C_SOURCE -DPRINTING_FFI_IOS=1 -O2 \
   -I"$STAGE/include" \
-  "$TASK_DIR/fotobox_cupsd.c" "$PLUGIN/src/printing_ffi.c" \
+  "$PLUGIN/tool/cups_host/fotobox_cupsd.c" "$PLUGIN/src/printing_ffi.c" \
   -L"$STAGE/lib" -lcups -lcupsimage -lz -liconv -lresolv \
   -framework Foundation -framework CoreFoundation -framework Security \
   -framework SystemConfiguration \

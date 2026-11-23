@@ -19,13 +19,22 @@ import 'package:webview_flutter/webview_flutter.dart';
 /// The WebView sends the device's own `Accept-Language`, so cupsd localizes the
 /// UI to the phone's locale (falling back to the English base templates).
 class CupsWebView extends StatefulWidget {
-  const CupsWebView({super.key, required this.url, required this.title});
+  const CupsWebView({
+    super.key,
+    required this.url,
+    required this.title,
+    this.credential,
+  });
 
   /// Absolute URL on the in-app cupsd, e.g. `http://127.0.0.1:55813/admin`.
   final String url;
 
   /// AppBar title.
   final String title;
+
+  /// Answers the server's HTTP authentication request (an iOS LAN print
+  /// bridge's user + token). Null: authentication requests are declined.
+  final WebViewCredential? credential;
 
   @override
   State<CupsWebView> createState() => _CupsWebViewState();
@@ -49,6 +58,9 @@ class _CupsWebViewState extends State<CupsWebView> {
           onPageFinished: (_) {
             if (mounted) setState(() => _loading = false);
           },
+          onHttpAuthRequest: widget.credential == null
+              ? null
+              : (request) => request.onProceed(widget.credential!),
           onWebResourceError: (err) {
             if (mounted) {
               setState(() {
@@ -132,9 +144,17 @@ extension CupsWebUi on PrintingFfi {
       }
       return;
     }
+    // An iOS LAN print bridge asks for its token on every page.
+    final token = Platform.isIOS ? CupsIos.instance.token : null;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => CupsWebView(url: url, title: title),
+        builder: (_) => CupsWebView(
+          url: url,
+          title: title,
+          credential: token == null
+              ? null
+              : WebViewCredential(user: kBridgeUser, password: token),
+        ),
       ),
     );
   }

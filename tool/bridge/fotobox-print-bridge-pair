@@ -1,0 +1,32 @@
+#!/bin/sh
+# Show how to connect the Fotobox app to this print bridge: the address, the
+# token, and a QR code of the pairing link. Scan it with the iPad's Camera app;
+# the link opens the Fotobox app, which switches to this bridge.
+#
+#   fotobox-print-bridge-pair            # this box's mDNS name (<hostname>.local)
+#   fotobox-print-bridge-pair 10.0.0.5   # a fixed address instead
+set -eu
+
+TOKEN_FILE=/etc/fotobox-print-bridge/token
+if [ ! -r "$TOKEN_FILE" ]; then
+	echo "fotobox-print-bridge-pair: cannot read $TOKEN_FILE (run with sudo)" >&2
+	exit 1
+fi
+TOKEN=$(cat "$TOKEN_FILE")
+HOST=${1:-$(hostname).local}
+SERVER="$HOST:631"
+LINK="fotobox-cups://pair?server=$SERVER&token=$TOKEN"
+
+echo "Fotobox print bridge"
+echo "  Address: $SERVER"
+echo "  Token:   $TOKEN"
+echo
+echo "In the Fotobox app: settings, Print host, then Find print bridge or Enter"
+echo "manually, or scan this code with the iPad's Camera app:"
+echo
+if command -v qrencode >/dev/null 2>&1; then
+	qrencode -t ANSIUTF8 "$LINK"
+else
+	echo "  (install qrencode to show a QR code)"
+fi
+echo "  $LINK"
