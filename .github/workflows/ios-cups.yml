@@ -44,3 +44,10 @@ jobs:
           fi
       - name: Verify FFI exports and bundled runtime
         run: python3 tool/ios/check_bundle.py example/build/ios/iphoneos/Runner.app
+      - name: Archive device framework for hardware testing
+        run: ditto -c -k --keepParent example/build/ios/iphoneos/Runner.app/Frameworks/printing_ffi.framework "$RUNNER_TEMP/printing_ffi.framework.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: printing-ffi-ios-device-framework
+          path: ${{ runner.temp }}/printing_ffi.framework.zip
+          retention-days: 7

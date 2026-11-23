@@ -86,14 +86,16 @@ extern void printing_ffi_ios_select_server(void);
     // The backend's new URI form identifies the precise Gutenprint model.
     // Explicit environment avoids inherited DEVICE_URI/test-mode variables.
     char *const env[] = {"PATH=/usr/bin:/bin", "LANG=C", "OLD_URI_SCHEME=0", NULL};
-    char *const argv[] = {(char *)backend.fileSystemRepresentation, NULL};
+    // Gutenprint uses argv[0]'s basename as the discovery URI scheme. The
+    // packaged filename is an implementation detail, not a CUPS backend name.
+    char *const argv[] = {"gutenprint53+usb", NULL};
     pid_t pid = -1;
-    int error = posix_spawn(&pid, argv[0], &actions, NULL, argv, env);
+    int error = posix_spawn(&pid, backend.fileSystemRepresentation, &actions, NULL, argv, env);
     posix_spawn_file_actions_destroy(&actions);
     if (error) {
         close(fd);
         struct stat info;
-        NSString *permissions = stat(argv[0], &info) == 0 ?
+        NSString *permissions = stat(backend.fileSystemRepresentation, &info) == 0 ?
             [NSString stringWithFormat:@"mode %04o, owner %u:%u",
                 (unsigned)(info.st_mode & 07777), (unsigned)info.st_uid, (unsigned)info.st_gid] :
             @"file attributes unavailable";
