@@ -1,23 +1,29 @@
 // fotobox-cupsd — the on-device CUPS host for iOS (topology L).
 //
 // A jailbreak LaunchDaemon (unsandboxed, so it CAN spawn + open USB) that runs
-// the bundled CUPS runtime, discovers the USB DNP printer, configures its queue,
+// the bundled CUPS runtime, discovers the USB DNP printer, creates its queue,
 // and keeps cupsd alive on a fixed loopback port. The sandboxed App-Store app
 // connects to that port over IPP and submits print jobs — it never runs any of
 // this itself, because iOS forbids a sandboxed app from forking or opening USB.
 //
-// Reuses the runtime's own C: start_cups_server (fork cupsd), generate_cups_dnp_ppd
-// (per-model PPD), add_cups_printer (create the queue). Only the USB discovery
-// parse + queue-naming (previously Dart/ObjC on the app side) live here now.
+// Runs as `mobile` (UserName in the LaunchDaemon plist), NOT root: the runtime's
+// start_cups_server writes "User #<uid>" and relies on cupsd being non-root (no
+// setuid privilege drop, no root-ownership checks on filters). That is the same
+// uid the runtime was built and tested for when it ran inside the app.
 //
-// Build: compile with the plugin sources for arm64 iOS, PRINTING_FFI_IOS defined,
-// linked against libcups/libcupsimage. Packaged + installed by the .deb.
-// NOT built on Linux; compiles on macOS/Xcode (or an arm64-iOS cross toolchain).
+// Reuses the runtime's own C: start_cups_server (spawn cupsd),
+// generate_cups_dnp_ppd (per-model PPD), add_cups_printer (create the queue).
+// Which printers are supported is decided HERE, on the host: the app is a plain
+// CUPS client and prints to whatever queue the host marks as default.
+//
+// Build: tool/ios/daemon/build_daemon_deb.sh (macOS/Xcode). The host test
+// (Linux, real cupsd, stub backend) compiles it with -DFOTOBOX_CUPS_PREFIX/
+// -DFOTOBOX_CUPS_STATE/-DFOTOBOX_CUPS_PORT pointing at a scratch tree.
 
 #include "../../../src/printing_ffi.h"
 
 #include <cups/cups.h>
-#include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
@@ -31,22 +37,30 @@
 
 extern char **environ;
 
-// Rootless-Procursus install prefix the .deb lays the runtime under. Overridable
-// at build time. Layout mirrors the old CupsRuntime.bundle:
-//   <PREFIX>/bin/*.so                      (libcupsd.so, libcupsbe_gutenprint53usb.so, filters)
+// iOS-only export from printing_ffi.c (not in the ffigen header).
+extern int printing_ffi_ios_running(void);
+
+// Read-only install prefix the .deb lays the runtime under (rootless Procursus):
+//   <PREFIX>/bin/*.so                (libcupsd.so, filters, Gutenprint backend)
 //   <PREFIX>/share/cups, share/gutenprint/5.3/xml, share/doc/cups
-//   <PREFIX>/state                         (writable: config, spool, logs — created at runtime)
 #ifndef FOTOBOX_CUPS_PREFIX
 #define FOTOBOX_CUPS_PREFIX "/var/jb/usr/lib/fotobox-cups"
 #endif
-// The fixed loopback port the client connects to (see kDefaultCupsServer in Dart).
+// Writable state (cupsd config, spool, logs, PPDs). Created and chowned to
+// mobile by the package's postinst; the install prefix itself is root-owned.
+#ifndef FOTOBOX_CUPS_STATE
+#define FOTOBOX_CUPS_STATE "/var/jb/var/lib/fotobox-cups"
+#endif
+// The fixed loopback port the client connects to (kDefaultCupsServer in Dart).
 #ifndef FOTOBOX_CUPS_PORT
 #define FOTOBOX_CUPS_PORT "6310"
 #endif
-#define DISCOVERY_INTERVAL_SECONDS 5
+#define CYCLE_SECONDS 5
+// A USB discovery that takes longer than this is wedged; kill it.
+#define DISCOVERY_TIMEOUT_SECONDS 20
 
-// Supported Gutenprint DNP / Citizen dye-sub drivers. A raw or wrong-model queue
-// is never created.
+// Gutenprint dye-sub drivers this host creates queues for (DNP + Citizen). A
+// raw or wrong-model queue is never created.
 static const char *const kSupportedDrivers[] = {
     "citizen-cw-01", "citizen-cw-02", "citizen-cx-02", "citizen-cx-02w",
     "citizen-cz-01", "dnp-ds40",      "dnp-ds80",      "dnp-ds80dx",
@@ -60,16 +74,27 @@ static int driver_supported(const char *driver) {
     return 0;
 }
 
+// Stop cupsd and everything it spawned with us. launchd sends SIGTERM to the
+// job on unload/upgrade; the whole process group goes so a stale cupsd never
+// keeps holding the port (or the printer) after the daemon is gone.
+static void on_terminate(int sig) {
+    signal(sig, SIG_DFL);
+    kill(0, sig);
+}
+
 // Spawn the Gutenprint USB backend in discovery mode (no args) and capture its
-// stdout+stderr into a caller buffer. Gutenprint derives the URI scheme from
-// argv[0]'s basename, so launch it as "gutenprint53+usb". Returns 0 on a clean
-// exit(0), -1 otherwise. Mirrors the old in-app ObjC discovery.
+// stdout+stderr. Gutenprint derives the URI scheme from argv[0]'s basename, so
+// launch it as "gutenprint53+usb". Returns 0 on a clean exit(0), -1 otherwise.
 static int run_discovery(const char *backend, const char *stp_data_path,
                          char *out, size_t outcap) {
     char tmpl[PATH_MAX];
-    snprintf(tmpl, sizeof(tmpl), "%s/state/discovery-XXXXXX", FOTOBOX_CUPS_PREFIX);
+    snprintf(tmpl, sizeof(tmpl), "%s/discovery-XXXXXX", FOTOBOX_CUPS_STATE);
     int fd = mkstemp(tmpl);
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        fprintf(stderr, "fotobox-cupsd: discovery temp file in %s: %s\n",
+                FOTOBOX_CUPS_STATE, strerror(errno));
+        return -1;
+    }
     unlink(tmpl);
     fcntl(fd, F_SETFD, FD_CLOEXEC);
 
@@ -87,11 +112,29 @@ static int run_discovery(const char *backend, const char *stp_data_path,
     pid_t pid = -1;
     int rc = posix_spawn(&pid, backend, &actions, NULL, argv, env);
     posix_spawn_file_actions_destroy(&actions);
-    if (rc != 0) { close(fd); return -1; }
+    if (rc != 0) {
+        fprintf(stderr, "fotobox-cupsd: spawn %s: %s\n", backend, strerror(rc));
+        close(fd);
+        return -1;
+    }
 
     int status = 0;
-    if (waitpid(pid, &status, 0) != pid) { close(fd); return -1; }
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) { close(fd); return -1; }
+    pid_t done = 0;
+    for (int i = 0; i < DISCOVERY_TIMEOUT_SECONDS * 10 && done == 0; i++) {
+        done = waitpid(pid, &status, WNOHANG);
+        if (done == 0) usleep(100000);
+    }
+    if (done == 0) {
+        fprintf(stderr, "fotobox-cupsd: USB discovery timed out; killed\n");
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
+        close(fd);
+        return -1;
+    }
+    if (done != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        close(fd);
+        return -1;
+    }
 
     ssize_t n = pread(fd, out, outcap - 1, 0);
     close(fd);
@@ -110,9 +153,9 @@ static void append_hex(char *dst, size_t cap, size_t *len, unsigned char b) {
 }
 
 // Build the deterministic queue name "<driver>_<hex(serial)>". Hex-encoding the
-// serial segment keeps it injective (two physical serials never collide) and a
-// valid CUPS queue name. Deterministic so a restart reuses the same queue.
-// Returns 0 on success, -1 if it would exceed the 127-char CUPS limit.
+// serial keeps it injective (two physical serials never collide) and a valid
+// CUPS queue name. Deterministic so a restart reuses the same queue. Returns 0
+// on success, -1 if it would exceed the 127-char CUPS limit.
 static int queue_name_for(const char *driver, const char *serial,
                           char *out, size_t cap) {
     size_t len = 0;
@@ -126,9 +169,50 @@ static int queue_name_for(const char *driver, const char *serial,
     return 0;
 }
 
+// True while cupsd is sending a job to a printer. Discovery opens the USB
+// devices, so it must never race a backend mid-print. Pending/held jobs do not
+// count: a job waiting on a swapped-out printer must not block the replacement
+// from getting its queue. A failed query counts as busy (skip one cycle).
+static int job_printing(void) {
+    cups_job_t *jobs = NULL;
+    int n = cupsGetJobs2(CUPS_HTTP_DEFAULT, &jobs, NULL, 0, CUPS_WHICHJOBS_ACTIVE);
+    if (n < 0) return 1;
+    int printing = 0;
+    for (int i = 0; i < n; i++)
+        if (jobs[i].state == IPP_JSTATE_PROCESSING) printing = 1;
+    cupsFreeJobs(n, jobs);
+    return printing;
+}
+
+// Make `queue` the server default (what `lpadmin -d` does), so the client —
+// which prints to the host's default queue — follows the printer attached most
+// recently, e.g. a spare swapped in mid-event.
+static void make_default(const char *queue) {
+    char uri[HTTP_MAX_URI];
+    httpAssembleURIf(HTTP_URI_CODING_ALL, uri, sizeof(uri), "ipp", NULL,
+                     cupsServer(), ippPort(), "/printers/%s", queue);
+    ipp_t *request = ippNewRequest(IPP_OP_CUPS_SET_DEFAULT);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", NULL, uri);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name",
+                 NULL, cupsUser());
+    ippDelete(cupsDoRequest(CUPS_HTTP_DEFAULT, request, "/admin/"));
+    if (cupsLastError() > IPP_STATUS_OK_CONFLICTING)
+        fprintf(stderr, "fotobox-cupsd: set default %s failed: %s\n", queue,
+                cupsLastErrorString());
+}
+
+static int queue_exists(const char *queue) {
+    cups_dest_t *dest = cupsGetNamedDest(CUPS_HTTP_DEFAULT, queue, NULL);
+    if (!dest) return 0;
+    cupsFreeDests(1, dest);
+    return 1;
+}
+
 // Parse the backend's discovery output and create a queue for every supported
-// printer found. Each "direct <uri> ..." line names a device; the uri is
-// "gutenprint53+usb://<driver>/<serial>".
+// printer that has none yet. Each "direct <uri> ..." line names a device; the
+// uri is "gutenprint53+usb://<driver>/<serial>". An EXISTING queue is never
+// touched: CUPS-Add-Modify-Printer restarts the active job and resets the
+// printer state, which would loop a print and undo an operator's Pause.
 static void configure_queues(const char *discovery) {
     char line[2048];
     const char *p = discovery;
@@ -156,12 +240,13 @@ static void configure_queues(const char *discovery) {
         char driver[64];
         snprintf(driver, sizeof(driver), "%s", host);
         const char *serial = slash + 1;
-        *slash = '/'; // restore uri for add_cups_printer (device-uri is the full uri)
+        *slash = '/'; // restore: the device-uri is the full uri
         if (!driver_supported(driver)) continue;
         if (strchr(serial, '/')) continue; // exactly one path segment
 
         char queue[160];
         if (queue_name_for(driver, serial, queue, sizeof(queue)) != 0) continue;
+        if (queue_exists(queue)) continue;
 
         const char *ppd = generate_cups_dnp_ppd(driver);
         if (!ppd) {
@@ -174,49 +259,51 @@ static void configure_queues(const char *discovery) {
                     queue, get_last_error());
             continue;
         }
+        make_default(queue);
         fprintf(stderr, "fotobox-cupsd: queue %s ready (%s)\n", queue, uri);
     }
 }
 
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
+    signal(SIGTERM, on_terminate);
+    signal(SIGINT, on_terminate);
     setbuf(stderr, NULL);
     // Pin the listen port so the sandboxed client finds us.
     setenv("PRINTING_FFI_CUPSD_PORT", FOTOBOX_CUPS_PORT, 1);
 
-    char root[PATH_MAX], bin[PATH_MAX], data[PATH_MAX], doc[PATH_MAX];
-    char backend[PATH_MAX], stp_data_path[PATH_MAX], statedir[PATH_MAX];
-    snprintf(root, sizeof(root), "%s/state", FOTOBOX_CUPS_PREFIX);
+    char bin[PATH_MAX], doc[PATH_MAX], backend[PATH_MAX], stp_data_path[PATH_MAX];
     snprintf(bin, sizeof(bin), "%s/bin", FOTOBOX_CUPS_PREFIX);
-    snprintf(data, sizeof(data), "%s", FOTOBOX_CUPS_PREFIX); // contains share/cups + share/gutenprint
     snprintf(doc, sizeof(doc), "%s/share/doc/cups", FOTOBOX_CUPS_PREFIX);
     snprintf(backend, sizeof(backend), "%s/libcupsbe_gutenprint53usb.so", bin);
     snprintf(stp_data_path, sizeof(stp_data_path),
              "%s/share/gutenprint/5.3/xml", FOTOBOX_CUPS_PREFIX);
-    snprintf(statedir, sizeof(statedir), "%s/state", FOTOBOX_CUPS_PREFIX);
-    mkdir(statedir, 0755); // best-effort; start_cups_server creates the subtree
 
-    fprintf(stderr, "fotobox-cupsd: starting on 127.0.0.1:%s, prefix %s\n",
-            FOTOBOX_CUPS_PORT, FOTOBOX_CUPS_PREFIX);
+    fprintf(stderr, "fotobox-cupsd: starting as uid %d on 127.0.0.1:%s, prefix %s, state %s\n",
+            (int)getuid(), FOTOBOX_CUPS_PORT, FOTOBOX_CUPS_PREFIX, FOTOBOX_CUPS_STATE);
+    if (getuid() == 0)
+        fprintf(stderr, "fotobox-cupsd: WARNING running as root; the LaunchDaemon "
+                        "must set UserName=mobile (cupsd refuses User #0)\n");
 
     for (;;) {
-        // start_cups_server is idempotent: it forks cupsd once, then just
-        // re-points on later calls while it is alive. This loop also recovers
-        // if cupsd dies.
-        int port = start_cups_server(root, bin, data, doc);
-        if (port <= 0) {
-            fprintf(stderr, "fotobox-cupsd: start_cups_server failed: %s\n",
-                    get_last_error());
-            sleep(DISCOVERY_INTERVAL_SECONDS);
-            continue;
+        // (Re)start cupsd when it is not running; this also recovers a crash.
+        if (!printing_ffi_ios_running()) {
+            int port = start_cups_server(FOTOBOX_CUPS_STATE, bin, FOTOBOX_CUPS_PREFIX, doc);
+            if (port <= 0) {
+                fprintf(stderr, "fotobox-cupsd: start_cups_server failed: %s\n",
+                        get_last_error());
+                sleep(CYCLE_SECONDS);
+                continue;
+            }
         }
-        // Rediscover each cycle so attaching/replacing a printer needs no
-        // restart; add_cups_printer is a no-op modify for an existing queue.
-        char out[65536];
-        if (run_discovery(backend, stp_data_path, out, sizeof(out)) == 0) {
+        // Rediscover each cycle so attaching or swapping a printer needs no
+        // restart — but never while a job is printing.
+        static char out[65536];
+        if (!job_printing() &&
+            run_discovery(backend, stp_data_path, out, sizeof(out)) == 0) {
             configure_queues(out);
         }
-        sleep(DISCOVERY_INTERVAL_SECONDS);
+        sleep(CYCLE_SECONDS);
     }
     return 0; // unreached
 }

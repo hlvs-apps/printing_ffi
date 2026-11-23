@@ -1501,6 +1501,54 @@ FFI_PLUGIN_EXPORT void printing_ffi_ios_configure_server(const char *server) {
     }
     pthread_mutex_unlock(&g_remote_server_lock);
 }
+
+// Ask the configured CUPS host (printing_ffi_ios_configure_server) which queue
+// to print to. The app is only a client: the HOST decides which printers it
+// supports and exposes (the on-device daemon creates queues only for the dye-sub
+// models it can drive; a LAN bridge has its own), so any queue is accepted. The
+// host's default queue wins, else the first one. Returns 1 and fills queue (and
+// model, from printer-make-and-model when the host reports it) when a queue
+// exists, 0 when the host answered with none, -1 when it is unreachable or the
+// query failed (reason in get_last_error()). A 3 s connect timeout keeps a
+// missing host from hanging the caller.
+FFI_PLUGIN_EXPORT int32_t printing_ffi_ios_probe(char *queue, size_t queue_cap,
+                                                 char *model, size_t model_cap) {
+    set_last_error("");
+    if (queue && queue_cap) queue[0] = '\0';
+    if (model && model_cap) model[0] = '\0';
+    printing_ffi_ios_select_server();
+    http_t *http = httpConnect2(cupsServer(), ippPort(), NULL, AF_UNSPEC,
+                                HTTP_ENCRYPTION_IF_REQUESTED, 1, 3000, NULL);
+    if (!http) {
+        set_last_error("CUPS host %s:%d unreachable", cupsServer(), ippPort());
+        return -1;
+    }
+    httpSetTimeout(http, 3.0, NULL, NULL);
+    cups_dest_t *dests = NULL;
+    int count = cupsGetDests2(http, &dests);
+    ipp_status_t error = cupsLastError();
+    cups_dest_t *pick = NULL;
+    for (int i = 0; i < count; i++) {
+        if (dests[i].instance) continue;
+        if (!pick || dests[i].is_default) pick = &dests[i];
+        if (dests[i].is_default) break;
+    }
+    if (pick) {
+        if (queue && queue_cap) snprintf(queue, queue_cap, "%s", pick->name);
+        const char *make = cupsGetOption("printer-make-and-model",
+                                         pick->num_options, pick->options);
+        if (model && model_cap && make) snprintf(model, model_cap, "%s", make);
+    }
+    if (count > 0) cupsFreeDests(count, dests);
+    httpClose(http);
+    if (pick) return 1;
+    if (count < 0 || error >= IPP_STATUS_ERROR_BAD_REQUEST) {
+        set_last_error("CUPS host %s:%d query failed: %s", cupsServer(), ippPort(),
+                       cupsLastErrorString());
+        return -1;
+    }
+    return 0;
+}
 #else
 static int g_cupsd_port = 0;
 #endif

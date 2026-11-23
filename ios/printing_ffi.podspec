@@ -22,9 +22,9 @@ A Flutter plugin for direct printer communication using native FFI bindings for 
   s.dependency 'Flutter'
   s.platform = :ios, '14.0'
 
-  # The payload does not exist at pod install / Xcode build planning time.
-  # Copy it explicitly after generation, rather than having Copy Resources
-  # snapshot the placeholder bundle before the native build fills it.
+  # The runtime and daemon package do not exist at pod install / Xcode build
+  # planning time. embed_runtime.sh copies the .deb explicitly after they are
+  # generated, rather than having Copy Resources snapshot a placeholder.
   s.preserve_paths = 'Resources/CupsRuntime.bundle'
   s.frameworks = 'Foundation', 'CoreFoundation', 'Security', 'SystemConfiguration'
   s.libraries = 'z', 'iconv', 'resolv'
@@ -40,11 +40,10 @@ A Flutter plugin for direct printer communication using native FFI bindings for 
     :script => 'bash "${PODS_TARGET_SRCROOT}/../tool/ios/daemon/build_daemon_deb.sh"',
     :execution_position => :before_compile,
   }, {
-    :name => 'Embed bundled iOS CUPS runtime',
+    :name => 'Embed on-device CUPS daemon package',
     :script => 'bash "${PODS_TARGET_SRCROOT}/../tool/ios/embed_runtime.sh"',
     :execution_position => :after_compile,
     :output_files => [
-      '$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/CupsRuntime.bundle',
       '$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/com.fotobox.cupsd.deb',
     ],
     :always_out_of_date => '1',

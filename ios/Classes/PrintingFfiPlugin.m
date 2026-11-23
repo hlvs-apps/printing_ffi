@@ -1,8 +1,6 @@
 #import "PrintingFfiPlugin.h"
 #import <UIKit/UIKit.h>
 #include "../../src/printing_ffi.h"
-#include <cups/cups.h>
-#include <string.h>
 
 @interface PrintingFfiPlugin () <UIDocumentInteractionControllerDelegate>
 @end
@@ -10,21 +8,15 @@
 // The iOS app is a CUPS CLIENT only. It never runs cupsd, opens USB, or spawns
 // a process (iOS forbids a sandboxed app from both). It points the in-process
 // libcups client at an external CUPS host — a localhost jailbreak daemon, or a
-// LAN bridge — and submits over IPP. No USB/IOKit code or private entitlements
-// ship in the app.
-extern void printing_ffi_ios_select_server(void);
+// LAN bridge — and prints to the queue that host offers. Which printers are
+// supported is the host's business; the app carries no model list. No USB/IOKit
+// code or private entitlements ship in the app.
 extern void printing_ffi_ios_configure_server(const char *server);
+extern int32_t printing_ffi_ios_probe(char *queue, size_t queue_cap,
+                                      char *model, size_t model_cap);
 
-// Supported Gutenprint DNP / Citizen dye-sub drivers. The host names each queue
-// "<driver>_<serial>"; the client accepts a queue carrying one of these driver
-// ids and never a raw or wrong-model fallback. Mirrors the daemon's set and the
-// driver list the old on-device discovery used.
-static const char *const kSupportedDrivers[] = {
-    "citizen-cw-01", "citizen-cw-02", "citizen-cx-02", "citizen-cx-02w",
-    "citizen-cz-01", "dnp-ds40",      "dnp-ds80",      "dnp-ds80dx",
-    "dnp-dsrx1",     "dnp-ds620",     "dnp-ds820",     "dnp-qw410",
-    NULL,
-};
+// The on-device daemon package, embedded by tool/ios/embed_runtime.sh.
+static NSString *const kDaemonPackage = @"com.fotobox.cupsd";
 
 @implementation PrintingFfiPlugin {
     dispatch_queue_t _worker;
@@ -47,47 +39,21 @@ static const char *const kSupportedDrivers[] = {
     printing_ffi_ios_configure_server(server.length ? server.UTF8String : "");
 }
 
-// Ask the configured host which supported DNP queue it exposes. The host ran USB
-// discovery and created the queue "<driver>_<serial>"; the client reads it back
-// over IPP. Returns {queueName, driver} for a supported queue, {detail} when the
-// host is reachable but exposes none, or a FlutterError when it is unreachable.
+// Ask the configured host which queue to print to (its default, else its first).
+// Returns {queueName, model} when it offers one, {detail} when it is reachable
+// but offers none, or a FlutterError when it is unreachable.
 - (id)probe {
-    printing_ffi_ios_select_server();
-    http_t *http = httpConnect2(cupsServer(), ippPort(), NULL, AF_UNSPEC,
-        HTTP_ENCRYPTION_IF_REQUESTED, 1, 3000, NULL);
-    if (!http) {
-        return [FlutterError errorWithCode:@"unavailable"
-            message:[NSString stringWithFormat:@"CUPS host %s:%d unreachable",
-                cupsServer(), ippPort()]
-            details:nil];
+    char queue[256];
+    char model[256];
+    int32_t found = printing_ffi_ios_probe(queue, sizeof(queue), model, sizeof(model));
+    if (found > 0) {
+        return @{@"queueName": [NSString stringWithUTF8String:queue] ?: @"",
+                 @"model": [NSString stringWithUTF8String:model] ?: @""};
     }
-    httpSetTimeout(http, 3.0, NULL, NULL);
-    cups_dest_t *dests = NULL;
-    int count = cupsGetDests2(http, &dests);
-    ipp_status_t error = cupsLastError();
-    NSString *queueName = nil;
-    NSString *driver = nil;
-    for (int i = 0; i < count && !queueName; i++) {
-        const char *name = dests[i].name;
-        if (!name) continue;
-        for (const char *const *d = kSupportedDrivers; *d; d++) {
-            size_t len = strlen(*d);
-            // "<driver>_..." — the host's queue-naming scheme.
-            if (strncmp(name, *d, len) == 0 && name[len] == '_') {
-                queueName = [NSString stringWithUTF8String:name];
-                driver = [NSString stringWithUTF8String:*d];
-                break;
-            }
-        }
-    }
-    if (count > 0) cupsFreeDests(count, dests);
-    httpClose(http);
-    if (queueName) return @{@"queueName": queueName, @"driver": driver};
-    if (count < 0 || error >= IPP_STATUS_ERROR_BAD_REQUEST) {
-        return [FlutterError errorWithCode:@"unavailable"
-            message:@"CUPS host query failed" details:nil];
-    }
-    return @{@"detail": @"no supported DNP queue on host"};
+    if (found == 0) return @{@"detail": @"host offers no printer queue yet"};
+    return [FlutterError errorWithCode:@"unavailable"
+        message:[NSString stringWithUTF8String:get_last_error()] ?: @"CUPS host unavailable"
+        details:nil];
 }
 
 // The frontmost view controller to present the open-in menu from.
@@ -106,18 +72,28 @@ static const char *const kSupportedDrivers[] = {
     return root;
 }
 
-// Hand the bundled daemon .deb to whatever jailbreak package manager is
-// installed (Sileo, Zebra, ...) via the iOS open-in menu. Store-agnostic: every
-// APT frontend registers as a .deb handler. The app never installs anything
-// itself — it only presents the file; the manager (root) runs dpkg + postinst.
-// Returns true if the menu was presented, false if no .deb or no handler.
-- (NSNumber *)installDaemon {
-    NSString *path = [[NSBundle mainBundle] pathForResource:@"com.fotobox.cupsd" ofType:@"deb"];
-    if (!path || ![[NSFileManager defaultManager] fileExistsAtPath:path]) {
-        return @NO;
+// The daemon .deb shipped in the app. With use_frameworks! (the Flutter
+// default) a pod's resources land in its framework, not the main bundle, so
+// look there first.
+- (NSString *)daemonPackagePath {
+    for (NSBundle *bundle in @[[NSBundle bundleForClass:[self class]], [NSBundle mainBundle]]) {
+        NSString *path = [bundle pathForResource:kDaemonPackage ofType:@"deb"];
+        if (path && [[NSFileManager defaultManager] fileExistsAtPath:path]) return path;
     }
+    return nil;
+}
+
+// Hand the bundled daemon .deb to whatever jailbreak package manager is
+// installed via the iOS open-in menu. Store-agnostic: Sileo and Zebra both
+// register as Viewer for org.debian.deb-archive. The app never installs
+// anything itself — it only presents the file; the manager (root) runs dpkg +
+// postinst. Returns "presented", "missing-package" (the build shipped no .deb)
+// "no-package-manager" (nothing on the device opens a .deb) or "no-window".
+- (NSString *)installDaemon {
+    NSString *path = [self daemonPackagePath];
+    if (!path) return @"missing-package";
     UIViewController *top = [self topViewController];
-    if (!top) return @NO;
+    if (!top) return @"no-window";
     _docController = [UIDocumentInteractionController
         interactionControllerWithURL:[NSURL fileURLWithPath:path]];
     _docController.delegate = self;
@@ -126,7 +102,7 @@ static const char *const kSupportedDrivers[] = {
         top.view.bounds.size.width / 2, top.view.bounds.size.height - 1, 1, 1)
         inView:top.view animated:YES];
     if (!presented) _docController = nil;
-    return @(presented);
+    return presented ? @"presented" : @"no-package-manager";
 }
 
 - (void)documentInteractionControllerDidDismissOpenInMenu:(UIDocumentInteractionController *)controller {

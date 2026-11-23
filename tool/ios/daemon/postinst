@@ -1,19 +1,25 @@
 #!/bin/sh
-# Load the on-device CUPS daemon after install/upgrade. No manual trustcache
-# step: launchd is hooked by the jailbreak, so it trusts the daemon binary on
-# spawn, and the daemon (then hooked) trusts cupsd + the backend it spawns.
+# Start the on-device CUPS daemon after install/upgrade. Runs as root under any
+# dpkg frontend (Sileo, Zebra, ...). Follows Procursus' own LaunchDaemon
+# packages (openssh-server): rootless launchctl is /var/jb/bin/launchctl.
+# No trustcache step: the hooked launchd trusts the daemon on spawn, and the
+# daemon (hooked in turn) trusts cupsd, the filters and the backend it spawns.
 set -e
+PATH=/var/jb/usr/bin:/var/jb/usr/sbin:/var/jb/bin:/var/jb/sbin:/usr/bin:/usr/sbin:/bin:/sbin:$PATH
+export PATH
 
 PLIST=/var/jb/Library/LaunchDaemons/com.fotobox.cupsd.plist
+STATE=/var/jb/var/lib/fotobox-cups
 
-if [ "$1" = configure ] || [ "$1" = install ] || [ "$1" = upgrade ] || [ -z "$1" ]; then
-    mkdir -p /var/jb/var/log
-    # Reload cleanly on upgrade (ignore "not loaded" on first install).
-    launchctl bootout system "$PLIST" 2>/dev/null || true
-    if ! launchctl bootstrap system "$PLIST" 2>/dev/null; then
-        # Older launchctl on some jailbreaks.
-        launchctl load -w "$PLIST" 2>/dev/null || true
-    fi
-fi
+case "$1" in
+	(configure)
+	# Writable state for the daemon, which runs as mobile (501).
+	mkdir -p "$STATE"
+	chown -R 501:501 "$STATE"
+	chmod 0755 "$STATE"
+	launchctl unload "$PLIST" 2>/dev/null || true
+	launchctl load -w "$PLIST"
+	;;
+esac
 
 exit 0

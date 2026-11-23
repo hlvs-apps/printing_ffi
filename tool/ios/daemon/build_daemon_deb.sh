@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Build the on-device CUPS daemon (topology L) and package it as a .deb, FROM
-# the app build. The app is the only checkout on the build machine; printing_ffi
-# lives in pub-cache, so this runs as a CocoaPods build phase (after build.sh)
-# and the resulting .deb is embedded in the app bundle for on-device install via
-# any jailbreak package manager (Sileo/Zebra/...).
+# Build the on-device CUPS daemon (topology L) and package it as a rootless
+# .deb, FROM the app build. The app is the only checkout on the build machine;
+# printing_ffi lives in pub-cache, so this runs as a CocoaPods build phase
+# (after tool/ios/build.sh) and embed_runtime.sh ships the .deb inside the app,
+# where the app hands it to the jailbreak package manager (Sileo, Zebra, ...).
 #
-# Self-contained: compiles with xcrun clang, packages with `ar` + `tar` (both on
-# macOS) — no dpkg-deb / brew dependency, so it cannot break the app build for a
-# missing tool. Runs on macOS/Xcode; NOT on Linux.
+# Needs dpkg-deb (`brew install dpkg`): it writes the canonical ar/tar layout
+# every dpkg frontend reads. Sileo opens a local .deb with the device's own
+# `dpkg-deb --field`, so a hand-rolled archive is not an option.
 #
 # Reuses the CUPS runtime from tool/ios/build.sh (must have run first).
 # Output: ios/Resources/com.fotobox.cupsd.deb
@@ -21,14 +21,22 @@ OUT="$PLUGIN/ios/Resources/com.fotobox.cupsd.deb"
 PREFIX_REL="var/jb/usr/lib/fotobox-cups"
 
 [[ $(uname -s) == Darwin ]] || { echo 'daemon build requires macOS/Xcode' >&2; exit 2; }
-[[ -f "$RUNTIME/bin/libcupsd.so" ]] || { echo "runtime missing; run tool/ios/build.sh first ($RUNTIME)" >&2; exit 2; }
-[[ -f "$STAGE/lib/libcups.a" ]] || { echo "staged libcups missing; run tool/ios/build.sh first" >&2; exit 2; }
+[[ -f "$RUNTIME/bin/libcupsd.so" ]] || { echo "error: CUPS runtime missing; tool/ios/build.sh must run first ($RUNTIME)" >&2; exit 2; }
+[[ -f "$STAGE/lib/libcups.a" ]] || { echo "error: staged libcups missing; tool/ios/build.sh must run first" >&2; exit 2; }
 
-# Skip if the .deb is already newer than every input (keeps rebuilds cheap).
-newest_input=$(ls -t "$TASK_DIR/fotobox_cupsd.c" "$PLUGIN/src/printing_ffi.c" \
-  "$TASK_DIR/control" "$TASK_DIR/postinst" "$TASK_DIR/prerm" \
+# Xcode script phases do not always inherit the login PATH; look where
+# Homebrew installs on Apple Silicon and Intel too.
+DPKG_DEB="$(PATH="$PATH:/opt/homebrew/bin:/usr/local/bin" command -v dpkg-deb || true)"
+if [[ -z "$DPKG_DEB" ]]; then
+  echo "error: dpkg-deb not found. Install it once with: brew install dpkg" >&2
+  exit 1
+fi
+
+# Skip if the .deb is newer than every input (keeps rebuilds cheap).
+newest_input=$(ls -t "$0" "$TASK_DIR/fotobox_cupsd.c" "$PLUGIN/src/printing_ffi.c" \
+  "$TASK_DIR/control" "$TASK_DIR/postinst" "$TASK_DIR/prerm" "$TASK_DIR/postrm" \
   "$TASK_DIR/com.fotobox.cupsd.plist" "$TASK_DIR/daemon.entitlements" \
-  "$RUNTIME/bin/libcupsd.so" 2>/dev/null | head -1)
+  "$RUNTIME/bin/libcupsd.so" 2>/dev/null | head -1 || true)
 if [[ -f "$OUT" && -n "$newest_input" && "$OUT" -nt "$newest_input" ]]; then
   echo "daemon .deb up to date: $OUT"; exit 0
 fi
@@ -54,40 +62,41 @@ xcrun lipo "$WORK/fotobox-cupsd" -verify_arch arm64
 # --- Ad-hoc sign the daemon unsandboxed (honored only on a jailbroken device) ---
 codesign --force --sign - --entitlements "$TASK_DIR/daemon.entitlements" "$WORK/fotobox-cupsd"
 
-# --- Lay out the data tree (installed files) ---
-DATA="$WORK/data"
-mkdir -p "$DATA/$PREFIX_REL/bin" "$DATA/$PREFIX_REL/share" \
+# --- Lay out the package tree ---
+DATA="$WORK/root"
+mkdir -p "$DATA/DEBIAN" "$DATA/$PREFIX_REL/bin" "$DATA/$PREFIX_REL/share" \
          "$DATA/var/jb/Library/LaunchDaemons"
-# Runtime (cupsd, filters, Gutenprint backend, data) — already ad-hoc signed with
-# the USB/iokit entitlements by build.sh.
+# Runtime (cupsd, filters, Gutenprint backend, data) — already ad-hoc signed
+# with the USB/IOKit entitlements by build.sh.
 cp -R "$RUNTIME/bin/." "$DATA/$PREFIX_REL/bin/"
 cp -R "$RUNTIME/share/." "$DATA/$PREFIX_REL/share/"
 install -m 0755 "$WORK/fotobox-cupsd" "$DATA/$PREFIX_REL/bin/fotobox-cupsd"
 install -m 0644 "$TASK_DIR/com.fotobox.cupsd.plist" \
   "$DATA/var/jb/Library/LaunchDaemons/com.fotobox.cupsd.plist"
-chmod -R a+rX "$DATA/$PREFIX_REL"
+chmod -R u+rwX,go+rX,go-w "$DATA/var"
+chmod 0755 "$DATA" "$DATA/DEBIAN"
 
-# --- Assemble the .deb ---
+# A fresh version per rebuilt package, so a package manager sees a newer app's
+# daemon as an upgrade rather than "already installed".
+VERSION="$(sed -n 's/^Version: *//p' "$TASK_DIR/control")+$(date -u +%Y%m%d%H%M%S)"
+sed "s/^Version: .*/Version: $VERSION/" "$TASK_DIR/control" > "$DATA/DEBIAN/control"
+chmod 0644 "$DATA/DEBIAN/control"
+for script in postinst prerm postrm; do
+  install -m 0755 "$TASK_DIR/$script" "$DATA/DEBIAN/$script"
+done
+
+# --- Assemble: gzip members are readable by every dpkg/APT frontend ---
 rm -f "$OUT"
-if command -v dpkg-deb >/dev/null 2>&1; then
-  # Preferred: dpkg-deb produces a canonical package. Control files go under
-  # DEBIAN/ in the data tree; --root-owner-group makes installed files root:root.
-  mkdir -p "$DATA/DEBIAN"
-  install -m 0644 "$TASK_DIR/control" "$DATA/DEBIAN/control"
-  install -m 0755 "$TASK_DIR/postinst" "$DATA/DEBIAN/postinst"
-  install -m 0755 "$TASK_DIR/prerm" "$DATA/DEBIAN/prerm"
-  dpkg-deb -Zxz --root-owner-group --build "$DATA" "$OUT"
-else
-  # Fallback (no dpkg): assemble the ar(debian-binary, control.tar.gz,
-  # data.tar.gz) by hand with tools every macOS has. bsdtar sets root ownership.
-  CTRL="$WORK/control"; mkdir -p "$CTRL"
-  install -m 0644 "$TASK_DIR/control" "$CTRL/control"
-  install -m 0755 "$TASK_DIR/postinst" "$CTRL/postinst"
-  install -m 0755 "$TASK_DIR/prerm" "$CTRL/prerm"
-  TAROWN=(--uid 0 --gid 0 --uname root --gname wheel)
-  ( cd "$CTRL" && tar "${TAROWN[@]}" -czf "$WORK/control.tar.gz" ./control ./postinst ./prerm )
-  ( cd "$DATA" && tar "${TAROWN[@]}" -czf "$WORK/data.tar.gz" ./var )
-  printf '2.0\n' > "$WORK/debian-binary"
-  ( cd "$WORK" && ar -r -c "$OUT" debian-binary control.tar.gz data.tar.gz )
-fi
+"$DPKG_DEB" -Zgzip --root-owner-group --build "$DATA" "$OUT"
+
+# --- Sanity: the archive dpkg will see on the device ---
+"$DPKG_DEB" --field "$OUT" Package Version Architecture
+# List once, then search: piping into `grep -q` would SIGPIPE dpkg-deb on a
+# large package and fail the build under pipefail.
+CONTENTS="$("$DPKG_DEB" --contents "$OUT")"
+for want in "./$PREFIX_REL/bin/fotobox-cupsd" "./$PREFIX_REL/bin/libcupsd.so" \
+            ./var/jb/Library/LaunchDaemons/com.fotobox.cupsd.plist; do
+  grep -qF " $want" <<<"$CONTENTS" || {
+    echo "error: $want missing from $OUT" >&2; rm -f "$OUT"; exit 1; }
+done
 echo "built $OUT ($(wc -c < "$OUT") bytes)"

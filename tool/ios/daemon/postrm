@@ -1,0 +1,13 @@
+#!/bin/sh
+# Purge drops the daemon's state (queues, spool, logs). Remove keeps it.
+set -e
+PATH=/var/jb/usr/bin:/var/jb/usr/sbin:/var/jb/bin:/var/jb/sbin:/usr/bin:/usr/sbin:/bin:/sbin:$PATH
+export PATH
+
+case "$1" in
+	(purge)
+	rm -rf /var/jb/var/lib/fotobox-cups
+	;;
+esac
+
+exit 0

@@ -10,17 +10,34 @@ import 'package:flutter/widgets.dart';
 /// entered `host:port`.
 const String kDefaultCupsServer = '127.0.0.1:6310';
 
+/// Outcome of [CupsIos.installDaemon].
+enum CupsDaemonInstall {
+  /// The open-in menu is up; the user picks Sileo, Zebra, ... to install.
+  presented,
+
+  /// This build of the app ships no daemon package.
+  missingPackage,
+
+  /// Nothing on the device opens a `.deb` (no jailbreak package manager).
+  noPackageManager,
+
+  /// The app had no foreground window to present from; retry.
+  noWindow,
+}
+
 /// iOS CUPS **client**. The app never runs cupsd, opens USB, or spawns a
 /// process — iOS forbids a sandboxed app from both. Instead it points the
 /// in-process libcups client at an external CUPS host (a localhost jailbreak
-/// daemon, or a LAN bridge) and submits over IPP. A host that is unreachable or
-/// exposes no supported DNP queue simply leaves printing unavailable; the app
-/// stays usable and degrades, never refuses.
+/// daemon, or a LAN bridge) and prints to the queue that host offers: its
+/// default, else its first. Which printers are supported is the host's
+/// business; the client carries no model list. A host that is unreachable or
+/// offers no queue simply leaves printing unavailable; the app stays usable and
+/// degrades, never refuses.
 ///
 /// Public surface is unchanged from the old in-app-cupsd facade ([ready],
 /// [queueName], [status], [watch], [initialize]) so `printing.dart` and the
 /// settings UI need no changes. What changed is the native protocol: `configure`
-/// (point libcups at [server]) + `probe` (find the DNP queue the host created),
+/// (point libcups at [server]) + `probe` (read back the host's queue),
 /// replacing the old `discover` (USB) + `start` (fork cupsd).
 class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
   CupsIos._();
@@ -42,9 +59,9 @@ class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
   String server = kDefaultCupsServer;
 
   String? queueName;
-  String? _driver;
+  String? _model;
 
-  /// Ready to print: a supported DNP queue was found on [server].
+  /// Ready to print: [server] offers a queue.
   bool get ready => queueName != null;
 
   Future<bool>? _pending;
@@ -54,16 +71,21 @@ class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
   /// Hand the app-bundled daemon `.deb` to the installed jailbreak package
   /// manager (Sileo, Zebra, ...) through the iOS open-in menu, so the user
   /// installs the on-device CUPS daemon (topology L) in one tap. The app never
-  /// performs the privileged install itself; the manager (root) does. Returns
-  /// false if the app ships no `.deb` or no package manager is installed.
-  Future<bool> installDaemon() async => (await _call('installDaemon')) == true;
+  /// performs the privileged install itself; the manager (root) does.
+  Future<CupsDaemonInstall> installDaemon() async =>
+      switch (await _call('installDaemon')) {
+        'presented' => CupsDaemonInstall.presented,
+        'missing-package' => CupsDaemonInstall.missingPackage,
+        'no-window' => CupsDaemonInstall.noWindow,
+        _ => CupsDaemonInstall.noPackageManager,
+      };
 
   /// Point the client at a different CUPS host (LAN bridge). Re-probes.
   Future<bool> useServer(String endpoint) {
     if (endpoint != server) {
       server = endpoint;
       queueName = null;
-      _driver = null;
+      _model = null;
     }
     return initialize();
   }
@@ -112,28 +134,27 @@ class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
       // Point libcups at the host. Cheap and local; it only stores the target.
       await _call('configure', {'server': server});
       stage = 'printer discovery';
-      // Ask the host which supported DNP queue it exposes. The host (daemon or
-      // bridge) ran the USB discovery and created the queue; the app only reads
-      // it back over IPP. Unreachable host throws; reachable-but-no-printer
-      // returns a map without a queueName.
+      // Ask the host which queue to print to. The host (daemon or bridge) ran
+      // the USB discovery and created the queue; the app only reads it back
+      // over IPP. Unreachable host throws; reachable-but-no-printer returns a
+      // map without a queueName.
       final probe = await _call('probe');
       final name = (probe is Map) ? probe['queueName'] : null;
       if (name is! String || name.isEmpty || name.length > 127) {
         final detail = (probe is Map && probe['detail'] is String)
             ? ': ${(probe['detail'] as String).trim()}'
             : '';
-        throw StateError('No accessible supported printer on $server$detail');
+        throw StateError('No printer queue on $server$detail');
       }
       queueName = name;
-      _driver = (probe is Map && probe['driver'] is String)
-          ? probe['driver'] as String
-          : null;
-      _setStatus('CUPS: ${_driver ?? 'printer'} on $server ready');
+      final model = (probe is Map) ? probe['model'] : null;
+      _model = (model is String && model.trim().isNotEmpty) ? model.trim() : null;
+      _setStatus('CUPS: ${_model ?? name} on $server ready');
       notifyListeners();
       return true;
     } catch (error) {
       queueName = null;
-      _driver = null;
+      _model = null;
       _setStatus('CUPS unavailable ($stage): $error');
       notifyListeners();
       return false;

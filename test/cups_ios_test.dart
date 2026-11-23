@@ -13,7 +13,7 @@ void main() {
         if (!reachable) {
           throw PlatformException(code: 'unavailable', message: 'connection refused');
         }
-        return {'queueName': 'dnp-ds620_313233', 'driver': 'dnp-ds620'};
+        return {'queueName': 'dnp-ds620_313233', 'model': 'DNP DS620'};
       },
     );
     expect(await cups.initialize(), false);
@@ -44,7 +44,7 @@ void main() {
     cups.dispose();
   });
 
-  test('a supported DNP queue on the host makes the client ready', () async {
+  test('the queue the host offers makes the client ready', () async {
     final seen = <String>[];
     final cups = CupsIos.forTest(
       invoke: (method, arguments) async {
@@ -53,27 +53,40 @@ void main() {
           expect(arguments!['server'], '127.0.0.1:6310');
           return null;
         }
-        return {'queueName': 'dnp-dsrx1_52583120', 'driver': 'dnp-dsrx1'};
+        return {'queueName': 'dnp-dsrx1_52583120', 'model': 'DNP DS-RX1'};
       },
     );
     expect(await cups.initialize(), true);
     expect(cups.ready, true);
     expect(cups.queueName, 'dnp-dsrx1_52583120');
-    expect(cups.status.value, contains('dnp-dsrx1'));
+    expect(cups.status.value, contains('DNP DS-RX1'));
     expect(cups.status.value, contains('127.0.0.1:6310'));
     expect(seen, ['configure', 'probe']);
     cups.dispose();
   });
 
-  test('a reachable host with no supported printer stays unavailable', () async {
+  test('any queue name the host offers is accepted; the client has no model list', () async {
+    // A LAN bridge names its queues its own way; the client must not care.
     final cups = CupsIos.forTest(
       invoke: (method, arguments) async =>
-          method == 'configure' ? null : {'detail': 'no supported queues on host'},
+          method == 'configure' ? null : {'queueName': 'Booth_Printer', 'model': ''},
+    );
+    expect(await cups.initialize(), true);
+    expect(cups.queueName, 'Booth_Printer');
+    // No model reported: the status names the queue instead.
+    expect(cups.status.value, contains('Booth_Printer'));
+    cups.dispose();
+  });
+
+  test('a reachable host with no queue stays unavailable', () async {
+    final cups = CupsIos.forTest(
+      invoke: (method, arguments) async =>
+          method == 'configure' ? null : {'detail': 'host offers no printer queue yet'},
     );
     expect(await cups.initialize(), false);
     expect(cups.ready, false);
-    expect(cups.status.value, contains('No accessible supported printer'));
-    expect(cups.status.value, contains('no supported queues on host'));
+    expect(cups.status.value, contains('No printer queue on 127.0.0.1:6310'));
+    expect(cups.status.value, contains('host offers no printer queue yet'));
     cups.dispose();
   });
 
@@ -83,7 +96,7 @@ void main() {
       invoke: (method, arguments) async {
         if (method == 'configure') return null;
         if (!reachable) throw PlatformException(code: 'unavailable');
-        return {'queueName': 'dnp-ds620_313233', 'driver': 'dnp-ds620'};
+        return {'queueName': 'dnp-ds620_313233', 'model': 'DNP DS620'};
       },
     );
     expect(await cups.initialize(), true);
@@ -111,7 +124,7 @@ void main() {
     );
     final first = cups.initialize();
     final second = cups.initialize();
-    probe.complete({'queueName': 'dnp-ds620_313233', 'driver': 'dnp-ds620'});
+    probe.complete({'queueName': 'dnp-ds620_313233', 'model': 'DNP DS620'});
     expect(await first, true);
     expect(await second, true);
     expect(configures, 1);
@@ -123,7 +136,7 @@ void main() {
     for (final response in <Object?>[
       null,
       {},
-      {'driver': 'dnp-ds620'},
+      {'model': 'DNP DS620'},
       {'queueName': ''},
       {'queueName': 123},
       {'queueName': 'q' * 128}, // over the 127-char CUPS limit
@@ -138,8 +151,14 @@ void main() {
     }
   });
 
-  test('installDaemon forwards to the native open-in and reports the result', () async {
-    for (final (native, expected) in <(Object?, bool)>[(true, true), (false, false), (null, false)]) {
+  test('installDaemon forwards to the native open-in and reports why it failed', () async {
+    for (final (native, expected) in <(Object?, CupsDaemonInstall)>[
+      ('presented', CupsDaemonInstall.presented),
+      ('missing-package', CupsDaemonInstall.missingPackage),
+      ('no-package-manager', CupsDaemonInstall.noPackageManager),
+      ('no-window', CupsDaemonInstall.noWindow),
+      (null, CupsDaemonInstall.noPackageManager),
+    ]) {
       final calls = <String>[];
       final cups = CupsIos.forTest(
         invoke: (method, arguments) async {
@@ -161,7 +180,7 @@ void main() {
           servers.add(arguments!['server'] as String);
           return null;
         }
-        return {'queueName': 'dnp-ds620_313233', 'driver': 'dnp-ds620'};
+        return {'queueName': 'dnp-ds620_313233', 'model': 'DNP DS620'};
       },
     );
     expect(await cups.initialize(), true);
