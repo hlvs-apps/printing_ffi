@@ -1,0 +1,12 @@
+Package: com.fotobox.cupsd
+Name: Fotobox CUPS daemon
+Version: 0.1.0
+Architecture: iphoneos-arm64
+Depends: firmware (>= 15.0)
+Maintainer: Fotobox
+Author: Fotobox
+Section: System
+Description: On-device CUPS host for Fotobox USB (DNP) dye-sub printing on a
+ jailbroken iOS device. Runs cupsd + the Gutenprint USB backend as a
+ LaunchDaemon on 127.0.0.1:6310; the Fotobox app connects to it over IPP. The
+ app itself stays sandboxed and App-Store-clean and never touches USB.

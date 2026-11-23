@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- LaunchDaemon for the on-device CUPS host (topology L). Launched by the
+     jailbreak's (hooked) launchd, so it runs unsandboxed and its binary + the
+     cupsd/backend it spawns are auto-trusted on exec. KeepAlive restarts it if
+     it dies; it survives app restarts because it is a daemon, not an app. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.fotobox.cupsd</string>
+	<key>Program</key>
+	<string>/var/jb/usr/lib/fotobox-cups/bin/fotobox-cupsd</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/var/jb/usr/lib/fotobox-cups/bin/fotobox-cupsd</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>StandardErrorPath</key>
+	<string>/var/jb/var/log/fotobox-cupsd.log</string>
+	<key>StandardOutPath</key>
+	<string>/var/jb/var/log/fotobox-cupsd.log</string>
+</dict>
+</plist>

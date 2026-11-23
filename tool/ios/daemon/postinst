@@ -1,0 +1,19 @@
+#!/bin/sh
+# Load the on-device CUPS daemon after install/upgrade. No manual trustcache
+# step: launchd is hooked by the jailbreak, so it trusts the daemon binary on
+# spawn, and the daemon (then hooked) trusts cupsd + the backend it spawns.
+set -e
+
+PLIST=/var/jb/Library/LaunchDaemons/com.fotobox.cupsd.plist
+
+if [ "$1" = configure ] || [ "$1" = install ] || [ "$1" = upgrade ] || [ -z "$1" ]; then
+    mkdir -p /var/jb/var/log
+    # Reload cleanly on upgrade (ignore "not loaded" on first install).
+    launchctl bootout system "$PLIST" 2>/dev/null || true
+    if ! launchctl bootstrap system "$PLIST" 2>/dev/null; then
+        # Older launchctl on some jailbreaks.
+        launchctl load -w "$PLIST" 2>/dev/null || true
+    fi
+fi
+
+exit 0

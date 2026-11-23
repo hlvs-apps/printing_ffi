@@ -1882,12 +1882,30 @@ FFI_PLUGIN_EXPORT int32_t start_cups_server(const char *server_root, const char 
     // --- ServerBin symlink farm -> nativeLibraryDir/lib*.so ---
     build_symlink_farm(serverbin, native_lib_dir);
 
-    // --- Pick a free localhost port ---
-    int port = find_free_port();
-    if (port <= 0)
+    // --- Pick the listen port ---
+    // The on-device daemon (topology L) pins a fixed port via
+    // PRINTING_FFI_CUPSD_PORT so the sandboxed client can connect to a known
+    // endpoint; the Android/app case leaves it unset and takes any free
+    // localhost port.
+    int port = 0;
+    const char *fixed_port = getenv("PRINTING_FFI_CUPSD_PORT");
+    if (fixed_port && *fixed_port)
     {
-        set_last_error("start_cups_server: could not find a free localhost port");
-        return -3;
+        port = atoi(fixed_port);
+        if (port <= 0 || port > 65535)
+        {
+            set_last_error("start_cups_server: invalid PRINTING_FFI_CUPSD_PORT '%s'", fixed_port);
+            return -3;
+        }
+    }
+    else
+    {
+        port = find_free_port();
+        if (port <= 0)
+        {
+            set_last_error("start_cups_server: could not find a free localhost port");
+            return -3;
+        }
     }
 
     // --- DataDir: cupsd wants <DataDir>/mime + <DataDir>/data; we extracted

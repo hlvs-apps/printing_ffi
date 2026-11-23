@@ -1,0 +1,12 @@
+#!/bin/sh
+# Stop the daemon before removal/upgrade so it releases the printer + port.
+set -e
+
+PLIST=/var/jb/Library/LaunchDaemons/com.fotobox.cupsd.plist
+
+if [ "$1" = remove ] || [ "$1" = upgrade ] || [ "$1" = deconfigure ] || [ -z "$1" ]; then
+    launchctl bootout system "$PLIST" 2>/dev/null || \
+        launchctl unload -w "$PLIST" 2>/dev/null || true
+fi
+
+exit 0
