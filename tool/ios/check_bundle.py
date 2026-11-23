@@ -12,6 +12,8 @@ for symbol in ('get_printers', 'get_print_jobs', 'start_cups_server',
     assert any(line.endswith(' _' + symbol) for line in symbols.splitlines()), symbol
 bundles = list(app.rglob('CupsRuntime.bundle'))
 assert len(bundles) == 1, f'Expected one CUPS payload, got {bundles}'
+assert bundles[0] == framework.parent / 'CupsRuntime.bundle', \
+    f'Payload is not in the plugin bundle used by runtime lookup: {bundles[0]}'
 for relative in (
     'bin/libcupsd.so', 'bin/libcupsd_deviced.so', 'bin/libcupsd_driverd.so',
     'bin/libcupsd_exec.so', 'bin/libcupsbe_gutenprint53usb.so',

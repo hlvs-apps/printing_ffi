@@ -22,16 +22,17 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install native build tools
         run: brew install pkg-config cmake
-      - name: Build native iOS runtime
-        run: bash tool/ios/build.sh
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: "3.47.4"
           channel: stable
           cache: true
-      - name: Build device example with bundled printing runtime
+      # Do not prebuild the native payload: the real first install starts with
+      # only Info.plist and must generate AND embed every helper during Xcode.
+      - name: Build device example from an unbuilt runtime
         working-directory: example
         run: |
+          test ! -e ../ios/Resources/CupsRuntime.bundle/bin
           if flutter build ios --release --no-codesign -v > /tmp/ios-build.log 2>&1; then
             grep 'Built ' /tmp/ios-build.log || true
           else

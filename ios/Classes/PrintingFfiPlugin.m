@@ -58,8 +58,17 @@ extern void printing_ffi_ios_select_server(void);
         _discovery = nil;
     }
     NSString *backend = [_runtime stringByAppendingPathComponent:@"bin/libcupsbe_gutenprint53usb.so"];
-    if (!backend || ![[NSFileManager defaultManager] isExecutableFileAtPath:backend]) {
-        *reason = @"Bundled USB backend is missing";
+    if (!_runtime) {
+        *reason = [NSString stringWithFormat:@"CUPS runtime bundle not found in %@ or %@",
+            [NSBundle bundleForClass:[self class]].bundlePath, [NSBundle mainBundle].bundlePath];
+        return nil;
+    }
+    if (![[NSFileManager defaultManager] fileExistsAtPath:backend]) {
+        *reason = [NSString stringWithFormat:@"Bundled USB backend file is missing: %@", backend];
+        return nil;
+    }
+    if (![[NSFileManager defaultManager] isExecutableFileAtPath:backend]) {
+        *reason = [NSString stringWithFormat:@"Bundled USB backend exists but execution is denied: %@", backend];
         return nil;
     }
     char output[PATH_MAX];

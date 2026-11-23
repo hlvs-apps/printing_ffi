@@ -22,15 +22,24 @@ A Flutter plugin for direct printer communication using native FFI bindings for 
   s.dependency 'Flutter'
   s.platform = :ios, '14.0'
 
-  s.resources = 'Resources/CupsRuntime.bundle'
+  # The payload does not exist at pod install / Xcode build planning time.
+  # Copy it explicitly after generation, rather than having Copy Resources
+  # snapshot the placeholder bundle before the native build fills it.
+  s.preserve_paths = 'Resources/CupsRuntime.bundle'
   s.frameworks = 'Foundation', 'CoreFoundation', 'Security', 'SystemConfiguration'
   s.libraries = 'z', 'iconv', 'resolv'
   stage = '$(PODS_TARGET_SRCROOT)/.build/arm64'
-  s.script_phase = {
+  s.script_phases = [{
     :name => 'Build bundled iOS CUPS and DNP drivers',
     :script => 'bash "${PODS_TARGET_SRCROOT}/../tool/ios/build.sh"',
     :execution_position => :before_compile,
-  }
+  }, {
+    :name => 'Embed bundled iOS CUPS runtime',
+    :script => 'bash "${PODS_TARGET_SRCROOT}/../tool/ios/embed_runtime.sh"',
+    :execution_position => :after_compile,
+    :output_files => ['$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/CupsRuntime.bundle'],
+    :always_out_of_date => '1',
+  }]
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'SUPPORTED_PLATFORMS' => 'iphoneos',
