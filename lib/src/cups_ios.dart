@@ -14,8 +14,7 @@ class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
   CupsIos.forTest({required this.invoke});
 
   @visibleForTesting
-  Future<dynamic> Function(String method, Map<String, dynamic>? arguments)?
-  invoke;
+  Future<dynamic> Function(String method, Map<String, dynamic>? arguments)? invoke;
 
   static const _channel = MethodChannel('printing_ffi/ios_cups');
   final status = ValueNotifier<String>('CUPS: not started');
@@ -54,9 +53,7 @@ class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  Future<dynamic> _call(String method, [Map<String, dynamic>? arguments]) =>
-      invoke?.call(method, arguments) ??
-      _channel.invokeMethod(method, arguments);
+  Future<dynamic> _call(String method, [Map<String, dynamic>? arguments]) => invoke?.call(method, arguments) ?? _channel.invokeMethod(method, arguments);
 
   /// Fail closed for printing, never for app startup. Concurrent callers share
   /// one attempt; unsuccessful attempts are retryable (permission/USB hot-plug).
@@ -65,6 +62,7 @@ class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
   });
 
   Future<bool> _initialize() async {
+    var stage = 'USB discovery';
     try {
       final discovery = await _call('discover');
       if (discovery is! String) {
@@ -72,28 +70,38 @@ class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
       }
       final printers = parseDiscovery(discovery);
       if (printers.isEmpty) {
-        throw StateError('No accessible supported USB printer');
+        final detail = discovery.trim();
+        throw StateError(
+          'No accessible supported USB printer'
+          '${detail.isEmpty ? '' : ': ${detail.substring(0, detail.length > 4096 ? 4096 : detail.length)}'}',
+        );
       }
       final printer = printers.first;
+      stage = 'scheduler and queue setup';
       final result = await _call('start', printer);
-      if (result is! Map ||
-          result['port'] is! int ||
-          (result['port'] as int) < 1 ||
-          (result['port'] as int) > 65535) {
+      if (result is! Map || result['port'] is! int || (result['port'] as int) < 1 || (result['port'] as int) > 65535) {
         throw StateError('CUPS did not become ready');
       }
       port = result['port'] as int;
       queueName = printer['queueName'];
-      status.value = 'CUPS: ${printer['driver']} ready';
+      _setStatus('CUPS: ${printer['driver']} ready');
       notifyListeners();
       return true;
     } catch (error) {
       port = null;
       queueName = null;
-      status.value = 'CUPS unavailable: $error';
+      _setStatus('CUPS unavailable ($stage): $error');
       notifyListeners();
       return false;
     }
+  }
+
+  void _setStatus(String value) {
+    if (status.value == value) return;
+    status.value = value;
+    // flutter run must report the startup cause, not only downstream polling
+    // failures. Repeated foreground probes with the same result stay quiet.
+    debugPrint(value);
   }
 
   /// Use Gutenprint's exact device URI (including its encoded serial), never an
@@ -119,20 +127,12 @@ class CupsIos extends ChangeNotifier with WidgetsBindingObserver {
       final fields = line.trim().split(RegExp(r'\s+'));
       if (fields.length < 2 || fields.first != 'direct') continue;
       final uri = Uri.tryParse(fields[1]);
-      if (uri == null ||
-          uri.scheme != 'gutenprint53+usb' ||
-          !drivers.contains(uri.host) ||
-          uri.pathSegments.length != 1 ||
-          uri.pathSegments.single.isEmpty ||
-          uri.hasQuery ||
-          uri.hasFragment) {
+      if (uri == null || uri.scheme != 'gutenprint53+usb' || !drivers.contains(uri.host) || uri.pathSegments.length != 1 || uri.pathSegments.single.isEmpty || uri.hasQuery || uri.hasFragment) {
         continue;
       }
       // Encode the entire URI injectively; replacing punctuation with '_' can
       // collide for two physical serials and silently reuse the wrong queue.
-      final serial = uri.pathSegments.single.codeUnits
-          .map((c) => c.toRadixString(16).padLeft(4, '0'))
-          .join();
+      final serial = uri.pathSegments.single.codeUnits.map((c) => c.toRadixString(16).padLeft(4, '0')).join();
       final queue = '${uri.host}_$serial';
       if (queue.length > 127) continue;
       result.add({'uri': fields[1], 'driver': uri.host, 'queueName': queue});

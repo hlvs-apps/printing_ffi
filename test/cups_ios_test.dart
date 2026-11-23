@@ -5,14 +5,40 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:printing_ffi/src/cups_ios.dart';
 
 void main() {
+  test('USB errors survive discovery and identify the failed startup stage', () async {
+    final cups = CupsIos.forTest(
+      invoke: (method, arguments) async {
+        expect(method, 'discover');
+        return 'ERROR: Could not open device 1343:0006 - 3 (need to be root?)';
+      },
+    );
+    expect(await cups.initialize(), false);
+    expect(cups.status.value, contains('USB discovery'));
+    expect(cups.status.value, contains('Could not open device'));
+    expect(cups.ready, false);
+    cups.dispose();
+  });
+
+  test('backend diagnostics do not hide a successfully discovered printer', () async {
+    final cups = CupsIos.forTest(
+      invoke: (method, arguments) async {
+        return method == 'discover' ? 'DEBUG: probing USB\ndirect gutenprint53+usb://dnp-ds620/123 "DNP"\nINFO: done' : throw PlatformException(code: 'unavailable', message: 'cupds spawn denied');
+      },
+    );
+    expect(await cups.initialize(), false);
+    expect(cups.status.value, contains('scheduler and queue setup'));
+    expect(cups.status.value, contains('spawn denied'));
+    cups.dispose();
+  });
+
   test('a failed health check revokes readiness and a restart restores it', () async {
     var running = true;
-    final cups = CupsIos.forTest(invoke: (method, arguments) async {
-      if (!running) throw PlatformException(code: 'unavailable');
-      return method == 'discover'
-          ? 'direct gutenprint53+usb://dnp-ds620/123 "DNP"'
-          : {'port': 16311};
-    });
+    final cups = CupsIos.forTest(
+      invoke: (method, arguments) async {
+        if (!running) throw PlatformException(code: 'unavailable');
+        return method == 'discover' ? 'direct gutenprint53+usb://dnp-ds620/123 "DNP"' : {'port': 16311};
+      },
+    );
     expect(await cups.initialize(), true);
     running = false;
     expect(await cups.initialize(), false);
@@ -102,8 +128,7 @@ void main() {
       {'port': '631'},
     ]) {
       final cups = CupsIos.forTest(
-        invoke: (method, arguments) async =>
-            method == 'discover' ? rx : response,
+        invoke: (method, arguments) async => method == 'discover' ? rx : response,
       );
       expect(await cups.initialize(), false);
       expect(cups.port, null);

@@ -71,7 +71,9 @@ extern void printing_ffi_ios_select_server(void);
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_adddup2(&actions, fd, STDOUT_FILENO);
-    posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+    // Preserve libusb/dyld diagnostics as well as discovery records. The Dart
+    // parser accepts only lines beginning with "direct".
+    posix_spawn_file_actions_adddup2(&actions, fd, STDERR_FILENO);
     // The backend's new URI form identifies the precise Gutenprint model.
     // Explicit environment avoids inherited DEVICE_URI/test-mode variables.
     char *const env[] = {"PATH=/usr/bin:/bin", "LANG=C", "OLD_URI_SCHEME=0", NULL};
@@ -92,8 +94,15 @@ extern void printing_ffi_ios_select_server(void);
     }
     if (done != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         if (done == 0) { kill(pid, SIGKILL); waitpid(pid, NULL, 0); }
+        char diagnostic[4096];
+        ssize_t size = pread(fd, diagnostic, sizeof(diagnostic) - 1, 0);
+        diagnostic[size > 0 ? size : 0] = '\0';
         close(fd);
-        *reason = @"USB discovery failed or timed out";
+        NSString *termination = done == 0 ? @"timed out" :
+            (done < 0 ? @"wait failed" :
+             (WIFSIGNALED(status) ? [NSString stringWithFormat:@"signal %d", WTERMSIG(status)] :
+              [NSString stringWithFormat:@"exit %d", WEXITSTATUS(status)]));
+        *reason = [NSString stringWithFormat:@"USB discovery %@: %s", termination, diagnostic];
         return nil;
     }
     char bytes[65537];
